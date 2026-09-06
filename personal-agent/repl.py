@@ -98,6 +98,10 @@ class Repl:
             self._status_msg = f"✓ {ev['name']} → {r}"
         elif t == "checkpoint":
             self._status_msg = f"💾 checkpoint bước {ev.get('step', '?')} đã lưu"
+        elif t == "turn":
+            self._status_msg = f"⟳ ĐỢT {ev['turn']}/{(config.MAX_TURNS if hasattr(config, 'MAX_TURNS') else 8)} — tiếp tục tự động…"
+        elif t == "turn_roll":
+            self._status_msg = f"⟳ hết đợt {ev['turn']}, tự chuyển đợt mới…"
 
     def _spinner(self):
         i = 0

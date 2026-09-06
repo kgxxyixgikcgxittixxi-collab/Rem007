@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.7"
+VERSION = "3.8"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -43,7 +43,8 @@ CTX_TOTAL = 20000       # tổng ký tự tối đa context sau trim (giới h�
 CTX_CAP = 5000          # độ dài tối đa mỗi message content
 SUM_AT = 60             # tóm tắt khi số message trong history vượt ngưỡng này
 SUM_BUDGET = 90000      # tóm tắt khi tổng ký tự context vượt ngưỡng này
-MAX_STEPS = 25          # số bước tối đa mỗi lượt agent
+MAX_STEPS = 25          # số bước tool tối đa mỗi đợt (turn) — hết thì tự chuyển đợt mới
+MAX_TURNS = 8           # số đợt tối đa 1 lượt câu hỏi (8 x 25 = 200 bước) — chống loop vô tận
 CHECKPOINT_EVERY = 8    # lưu checkpoint ra file mỗi N bước
 SHELL_TIMEOUT = 60
 MAX_TOOL_OUT = 3000    # kết quả tool bị cắt ở mức này trước khi vào history
