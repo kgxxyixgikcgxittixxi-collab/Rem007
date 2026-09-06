@@ -66,6 +66,26 @@ Key lưu trong `~/.rem_ai/rem.db`.
 ```
 
 ## Cài đặt nhanh cho người dùng mới
+
+### Cách 1 — Dùng lệnh nhanh `Remtm` (giống gõ `opencode`) [khuyên dùng]
+```bash
+git clone https://github.com/kgxxyixgikcgxittixxi-collab/Rem007.git
+cd Rem007/personal-agent
+bash install.sh          # tự phát hiện Termux/PC, cài python + deps + tạo DB,
+                         # VÀ tự cài lệnh `Remtm` vào PATH cho bạn
+Remtm                    # ← giờ chỉ cần gõ Remtm ở BẤT KỲ đâu là mở agent
+/key gsk_...             # thêm Groq key đầu tiên (lưu ở ~/.rem_ai/rem.db), rồi /help
+```
+`install.sh` tự đặt `Remtm` vào:
+- **PC/Linux** → `~/.local/bin/Remtm` (và tự thêm vào `PATH` trong `~/.bashrc`/`~/.zshrc`)
+- **Termux (Android)** → `$PREFIX/bin/Remtm`
+
+> Nếu đã chạy `install.sh` lần trước mà chưa thấy `Remtm`, mở **terminal mới** là có. Hoặc cài tay:
+> ```bash
+> cp Rem007/Remtm ~/.local/bin/Remtm && chmod +x ~/.local/bin/Remtm
+> ```
+
+### Cách 2 — Chạy trực tiếp (không cài lệnh nhanh)
 ```bash
 git clone https://github.com/kgxxyixgikcgxittixxi-collab/Rem007.git
 cd Rem007/personal-agent

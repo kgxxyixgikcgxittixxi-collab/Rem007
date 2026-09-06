@@ -1,0 +1,44 @@
+#!/bin/sh
+# Rem Agent launcher — gõ `Remtm` ở bất kỳ đâu để mở agent
+# Cài đặt: chạy install.sh trong personal-agent/ (tự đưa script này vào PATH)
+SELF=""
+for cand in "$0" "$(command -v Remtm 2>/dev/null)" "$HOME/.local/bin/Remtm" "$PREFIX/bin/Remtm" "/usr/local/bin/Remtm"; do
+    [ -n "$cand" ] || continue
+    resolved="$(readlink -f "$cand" 2>/dev/null || echo "$cand")"
+    if [ -f "$resolved" ]; then
+        SELF="$resolved"
+        break
+    fi
+done
+[ -n "$SELF" ] || { echo "[Remtm] Không xác định được vị trí. Hãy chạy lại install.sh."; exit 1; }
+
+DIR="$(dirname "$SELF")"
+
+# Nếu script nằm ở repo root → app trong personal-agent/
+APP="$DIR/personal-agent"
+# Nếu script bị copy ra chỗ riêng (vd ~/.local/bin) → tìm repo kế bên hoặc nhà
+if [ ! -f "$APP/main.py" ]; then
+    APP="$(dirname "$DIR")/personal-agent"
+fi
+# fallback: repo đã clone
+if [ ! -f "$APP/main.py" ]; then
+    for base in "$HOME/Rem007" "$HOME/rem/Rem007" "$HOME/Documents/Rem007"; do
+        if [ -f "$base/personal-agent/main.py" ]; then
+            APP="$base/personal-agent"
+            break
+        fi
+    done
+fi
+
+cd "$APP" || { echo "[Remtm] Không tìm thấy thư mục agent: $APP"; exit 1; }
+
+if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif command -v python >/dev/null 2>&1; then
+    PY=python
+else
+    echo "[Remtm] Thiếu python3. Hãy cài rồi chạy lại (xem install.sh)."
+    exit 1
+fi
+
+exec "$PY" main.py "$@"
