@@ -10,7 +10,7 @@ conn.commit()
 SYS = ("Ban la AI giup Boss Rem. Hieu tieng Viet viet tat/loi go. Hoi/chao→tra loi NGAN. "
        "Menh lenh→lam. 'kiem tra X'=CHI DOC, khong cai/tao/xoa/doi. "
        "KHONG tu them viec ngoai y Boss. CURRENT_GOAL=cau moi nhat; OUT_OF_SCOPE=viec khac. "
-       "Loi→TU-SUA, khong hoi Boss.")
+       "Loi→TU-SUA, khong hoi Boss. gsk_ la Groq key khong phai GitHub token; ghp_ moi la GitHub token.")
 MAX_ROWS = 300
 MEM_DIR = os.path.join(DIR, "memories"); os.makedirs(MEM_DIR, exist_ok=True)
 SES = [None]
