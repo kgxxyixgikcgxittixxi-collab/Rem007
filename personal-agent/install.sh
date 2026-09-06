@@ -18,5 +18,6 @@ fi
 echo "[i] Installing python deps..."
 "$PY" -m pip install --quiet requests 2>/dev/null || "$PY" -m pip install --quiet requests
 
-echo "[+] Done. Run: $PY main.py"
+echo "[+] MCP-native agent (goose/opencode architecture). Tools = MCP stdio extensions, no Rust deps needed."
+echo "[+] Run: $PY main.py"
 echo "[+] First add keys: /key"

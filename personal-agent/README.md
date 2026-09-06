@@ -1,66 +1,59 @@
 # Rem Agent
 
-Personal AI agent chạy 100% trên **Groq (Qwen3.8-27B)** — kiến trúc module hóa theo phong cách opencode / Replit Agent. Hoạt động trên **Termux (Android)** và **PC/Linux**.
+Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-## Tính năng
-- 🔀 **Router thông minh**: phân biệt `chat` / `headless` (lệnh CLI) / `gui` (mở app, bấm màn hình)
-- 🧠 **Bộ nhớ** trong SQLite: tóm tắt hội thoại, tóm tắt phiên, "kinh nghiệm" tự lưu
-- 🛠️ **Tool calls**: shell, đọc/ghi/sửa file (`read/write/edit/glob/grep/ls`), tìm kiếm web, điều khiển GUI (Tap/Swipe/Type qua adb hoặc xdotool)
-- 🔑 **Xoay vòng nhiều Groq key** — tự thử key kế khi lỗi/rate-limit
-- ✅ **An toàn**: lệnh nguy hiểm bị chặn, hoặc hỏi Boss xác nhận
-- 🎨 **REPL đẹp**: màu, typewriter, lệnh `/help`, `/status`, `/keys`, `/key`, `/clear`
+## Kiến trúc (mô phỏng goose/opencode)
+
+```
+repl.py ── Repl (TUI, /help /status /plan /build /sessions...)
+   │
+agentloop.py ── Agent loop: LLM → tool_calls → execute → lặp
+   │  ┌────────── sessions.py (JSONL journal + compact)
+   │  └────────── permissions.py (allow / ask / deny — người dùng xác nhận trước tool nguy hiểm)
+   │
+extensions.py ── ExtensionManager: khám phá & gọi tool
+   │
+   ├── mcp_servers/developer  (9 tool)  bash, read/write/edit file, grep, glob, cwd...
+   ├── mcp_servers/webtool    (3 tool)  web_search, web_fetch, github_api
+   └── mcp_servers/memory     (2 tool)  remember, recall (graph.json)
+mcplib.py  ── Client/Server MCP over stdio (chuẩn MCP, chỉ dùng stdlib, không cần Rust)
+providers/groq.py ── Groq API + xoay vòng nhiều key + native tool_calls
+```
+
+- **MCP stdio**: mỗi extension = tiến trình con `python -m mcp_servers.xxx`, giao tiếp bằng JSON-RPC chuẩn MCP (`initialize`, `tools/list`, `tools/call`). Không cần `mcp`/`fastmcp` (2 gói đó kéo Rust-dep không cài được trên Android).
+- **Agent loop**: Groq trả `tool_calls` (schema tự khám phá từ MCP), agent kiểm tra permission rồi execute, lặp tới khi hết tool → tổng hợp tiếng Việt.
+- **Permission** giống opencode: preset `build` (tool ghi/bash/web_fetch = "ask"), preset `plan` (cấm ghi/bash/fetch, chỉ đọc). Tool nguy hiểm (`rm -rf /`, `mkfs`, `dd if=`) bị chặn cứng trong MCP server.
+- **Session journal**: JSONL theo từng lượt, có `/sessions` liệt kê + `/new` bắt đầu mới, tự `compact` (tóm tắt) khi hội thoại quá dài.
 
 ## Cài đặt
 
-### Termux (Android)
 ```bash
+# Termux
 pkg install -y python git
 git clone https://github.com/kgxxyixgikcgxittixxi-collab/Rem007.git
 cd Rem007/personal-agent
-bash install.sh
+bash install.sh          # cài requests (chỉ phụ thuộc Python stdlib còn lại)
 python main.py
-```
 
-### PC/Linux
-```bash
-sudo apt install -y python3 python3-pip git
-git clone https://github.com/kgxxyixgikcgxittixxi-collab/Rem007.git
-cd Rem007/personal-agent
-bash install.sh
-python3 main.py
+# PC/Linux: dùng python3 + pip install requests
 ```
 
 ## Thêm Groq key
 ```bash
-/key          # dán 1 hoặc nhiều key gsk_...
-/keys         # xem đã có bao nhiêu key
+/key gsk_...   # dán key (có thể dán nguyên cụm chứa nhiều key, tự tách)
+/keys          # xem có bao nhiêu key
 ```
-Key được lưu trong `~/.rem_ai/rem.db`. Không có key → agent chỉ trả `[!] groq loi.`
+Key lưu trong `~/.rem_ai/rem.db`.
 
-## Cách dùng
+## Lệnh REPL
 ```text
-[Rem] kiem tra ram                 → headless, chạy `free -h`
-[Rem] vao coc coc tim anime        → mở app + tìm kiếm
-[Rem] hello                        → chat ngắn gọn
-[Rem] ghi file hello.txt noi dung  Hello   → tool write file
-[Rem] /status                      → thông tin hệ thống
-```
-
-## Cấu trúc
-```
-personal-agent/
-├── config.py        # cấu hình, đường dẫn, model
-├── router.py        # phân loại yêu cầu
-├── memory.py        # lịch sử SQLite + tóm tắt
-├── planner.py       # lập kế hoạch hành động (JSON)
-├── executor.py      # chạy kế hoạch / tool calls
-├── verifier.py      # kiểm tra, xác nhận quyền
-├── web.py           # tìm kiếm web + đọc trang
-├── main.py          # REPL chính
-├── providers/groq.py
-├── tools/shelltool.py
-├── tools/fileops.py
-└── tools/pctool.py
+/status    danh sách extension + tool + session
+/sessions  liệt kê session cũ
+/new       session mới
+/plan        chuyển preset đọc-chỉ (cấm ghi/bash/web_fetch)
+/build       quay lại preset thường (hỏi xác nhận khi cần)
+/key /keys  quản lý Groq keys
+	exit      thoát
 ```
 
 ## License

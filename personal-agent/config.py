@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "2.0"
+VERSION = "3.0"
 DEBUG = os.environ.get("REM_DEBUG", "0") == "1"
 MODEL_CHAT = "qwen/qwen3.8-27b"
 MODEL_CLONE = "llama-3.3-70b-versatile"
