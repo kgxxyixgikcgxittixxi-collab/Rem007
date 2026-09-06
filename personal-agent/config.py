@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.15"
+VERSION = "3.16"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -49,3 +49,7 @@ CHECKPOINT_EVERY = 8    # lưu checkpoint ra file mỗi N bước
 SHELL_TIMEOUT = 60
 MAX_TOOL_OUT = 3000    # kết quả tool bị cắt ở mức này trước khi vào history
 MAX_TRACE = 2000
+MAX_TASK_SECONDS = 240   # tổng thời gian tối đa 1 câu hỏi → quá thì tự dừng (chống treo)
+TOOL_TIMEOUT_FAST = 90   # timeout MCP cho tool thường (bash/đọc/ghi/web...)
+TOOL_TIMEOUT_PKG = 600   # timeout cho pip_install/ensure_tool (cài đặt lâu)
+TOOL_SLOW_WARN = 40      # sau N giây 1 bước chưa xong → spinner chuyển đỏ cảnh báo treo

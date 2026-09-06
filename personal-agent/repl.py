@@ -87,6 +87,8 @@ class Repl:
         self._busy = False
         self._pending = 0
         self._status_msg = ""
+        self._status_since = 0.0
+        self._spin_start = 0.0
         self._spin_on = False
         self._mk_agent()
 
@@ -97,6 +99,10 @@ class Repl:
 
     # ── sự kiện từ agent (chạy trong worker thread) ──
     # Chỉ hiện 1 trạng thái ngắn gọn (giống opencode), không spam chi tiết từng bước
+    def _set_status(self, msg):
+        self._status_msg = msg
+        self._status_since = time.time()
+
     def _on_ev(self, ev):
         t = ev.get("type")
         if t == "tool_start":
@@ -110,25 +116,43 @@ class Repl:
                 "ensure_tool": "đang cài công cụ", "pip_install": "đang cài package",
                 "github_api": "đang gọi GitHub",
             }.get(n, f"đang dùng {n}")
-            self._status_msg = nice
+            self._set_status(nice)
+        elif t == "tool_done":
+            r = (ev.get("result") or "")
+            if r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]")):
+                self._set_status(f"⚠ {ev.get('name', '?')}: báo lỗi, đang xử lý tiếp")
         elif t in ("thinking", "llm"):
-            self._status_msg = "đang suy nghĩ"
+            self._set_status("đang suy nghĩ")
         elif t == "retry":
-            self._status_msg = "mạng bận, đang thử lại"
+            self._set_status("mạng bận, đang thử lại")
         elif t == "turn":
-            self._status_msg = "tiếp tục xử lý…"
+            self._set_status("tiếp tục xử lý…")
         elif t == "turn_roll":
-            self._status_msg = "đang chuyển lượt…"
+            self._set_status("đang chuyển lượt…")
         elif t == "checkpoint":
-            self._status_msg = "đang lưu tiến độ…"
+            self._set_status("đang lưu tiến độ…")
         # bỏ qua tool_done để không spam "✓ xyz done"
 
     def _spinner(self):
         i = 0
+        self._spin_start = time.time()
+        if self._status_since <= 0:
+            self._status_since = time.time()
         while self._spin_on:
             f = SPIN[i % len(SPIN)]
-            msg = f"{f}  {self._status_msg}" if self._status_msg else f
-            sys.stdout.write("\r\033[36m" + msg[:160] + "\033[0m\033[K")
+            el = int(time.time() - self._spin_start)
+            wait = time.time() - self._status_since
+            base = f"{f}  {self._status_msg}" if self._status_msg else f
+            if el >= 60:
+                base += f"  [{el // 60}p{el % 60:02d}s]"
+            else:
+                base += f"  [{el}s]"
+            if wait >= config.TOOL_SLOW_WARN:
+                base += "  ⏳ lâu quá — /stop nếu kẹt"
+                col = "\033[91m"
+            else:
+                col = "\033[36m"
+            sys.stdout.write("\r" + col + base[:160] + "\033[0m\033[K")
             sys.stdout.flush()
             time.sleep(0.09)
             i += 1
@@ -139,7 +163,7 @@ class Repl:
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
-    # ── worker: xử lý câu hỏi theo hàng đợi, cho phép soạn câu mới chờ lượt ──
+# ── worker: xử lý câu hỏi theo hàng đợi, cho phép soạn câu mới chờ lượt ──
     def _worker(self):
         while True:
             kind, payload = self.q.get()
@@ -150,23 +174,41 @@ class Repl:
                     self._agent.stop()
                 except Exception:
                     pass
+                # dọn các câu đang chờ — tránh chạy nối tiếp vô nghĩa sau khi dừng
+                drained = 0
+                while True:
+                    try:
+                        k, _ = self.q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if k == "quit":
+                        self.q.put(("quit", None))
+                        break
+                    if k == "task":
+                        drained += 1
+                self._pending = 0
+                if drained:
+                    _p(f"Đã bỏ {drained} câu đang chờ.", "dim")
                 continue
             if kind == "task":
                 self._busy = True
                 self._spin_on = True
-                threading.Thread(target=self._spinner, daemon=True).start()
+                self._set_status("đang bắt đầu")
+                spin = threading.Thread(target=self._spinner, daemon=True)
+                spin.start()
                 try:
                     out = self._agent.run(payload)
                 except Exception as e:
                     out = f"[LỖI] {type(e).__name__}: {e}"
                 self._spin_on = False
                 self._busy = False
-                self._clear_spin_line()
+                spin.join(timeout=1)      # đợi spinner bỏ dòng cuối xong
+                self._clear_spin_line()   # rồi mới in tránh bị đè "Rem>"
                 if out:
                     # Tiền tố Rem> màu xanh biển + nội dung trả lời của AGENT
                     sys.stdout.write(P_AGENT)
                     sys.stdout.flush()
-                    _type(out, "gr")
+                    _type(out, "ob")
                 self._pending = 0
 
     # ── câu hỏi quyền (safe mode): chạy trong worker, hỏi trực tiếp ──
@@ -345,6 +387,10 @@ class Repl:
                     self.q.put(("quit", None))
                     break
                 continue
+            # Tô lại dòng người gõ màu xanh lá (thay echo trắng của input) + prefix User>
+            sys.stdout.write("\033[1A\r\033[2K")
+            sys.stdout.write(C["lm"] + "User> " + line + C["reset"] + "\n")
+            sys.stdout.flush()
             if self._busy:
                 self._pending += 1
                 _p(f"⏳ Câu hỏi đã xếp hàng (#{self._pending}). Agent sẽ trả lời sau lượt hiện tại — gõ /stop để dừng.",

@@ -51,7 +51,7 @@ class Extension:
             except Exception:
                 pass
 
-    def call(self, name, args, timeout=600):
+    def call(self, name, args, timeout=120):
         return self.client.call_tool(name, args, timeout)
 
     def close(self):
@@ -102,7 +102,7 @@ class Manager:
                 )
         return out
 
-    def call(self, name, args, timeout=600):
+    def call(self, name, args, timeout=120):
         tm = self.tool_map()
         if name not in tm:
             return f"[LOI] tool '{name}' không tồn tại trong extension nào"

@@ -68,6 +68,15 @@ class Agent:
     def stop(self):
         self.cancel.set()
 
+    def _check_stop(self, deadline):
+        """Trả message dừng nếu cancel hoặc hết giờ chống treo, else None."""
+        if self.cancel.is_set():
+            return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+        if deadline and time.time() > deadline:
+            mm = config.MAX_TASK_SECONDS // 60
+            return f"[ĐÃ DỪNG] chạy quá {mm} phút (giới hạn chống treo). Gõ 'tiếp tục' để chạy thêm."
+        return None
+
     def _cwd(self):
         try:
             return self.manager.call("cwd", {}, 10).strip()
@@ -80,9 +89,11 @@ class Agent:
         LLM trả content không kèm tool (task xong), /stop, lỗi Groq, hoặc hết MAX_TURNS."""
         self.cancel.clear()
         sessions.append(self.sid, {"role": "user", "content": user_text})
+        deadline = time.time() + config.MAX_TASK_SECONDS
         for turn in range(1, MAX_TURNS + 1):
-            if self.cancel.is_set():
-                return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+            stopped = self._check_stop(deadline)
+            if stopped:
+                return stopped
             msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
             if turn > 1:
                 self._emit({"type": "turn", "turn": turn})
@@ -96,8 +107,9 @@ class Agent:
                 msgs = sessions.compact(self.sid, msgs)
                 msgs = sessions.trim(msgs)
             for step in range(MAX_STEPS):
-                if self.cancel.is_set():
-                    return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+                stopped = self._check_stop(deadline)
+                if stopped:
+                    return stopped
                 self._emit({"type": "thinking", "step": step + 1, "turn": turn})
                 msgs = sessions.compact(self.sid, msgs)
                 msgs = sessions.trim(msgs)
@@ -105,13 +117,15 @@ class Agent:
                 reply = None
                 # retry nhiều lần với backoff khi Groq không phản hồi (rate-limit/quota)
                 for _ in range(5):
-                    if self.cancel.is_set():
-                        return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+                    stopped = self._check_stop(deadline)
+                    if stopped:
+                        return stopped
                     reply = groq.chat(msgs, tools=self.manager.schemas() or None)
                     if reply:
                         break
                     self._emit({"type": "retry"})
-                    time.sleep(min(3 * (_ + 1), 20))  # 3s, 6s, 9s, 12s...
+                    if self.cancel.wait(min(3 * (_ + 1), 20)):
+                        return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
                 if not reply:
                     return "[LOI] Groq không phản hồi (quota/rate-limit). Chờ 1 lúc rồi gõ lại, hoặc /keys."
                 tool_calls = reply.get("tool_calls") or []
@@ -139,8 +153,9 @@ class Agent:
                     },
                 )
                 for tc in tool_calls:
-                    if self.cancel.is_set():
-                        return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+                    stopped = self._check_stop(deadline)
+                    if stopped:
+                        return stopped
                     fn = tc.get("function") or {}
                     name = fn.get("name", "?")
                     try:
@@ -153,7 +168,14 @@ class Agent:
                         result = f"[TU CHOI] Tool {name} bị chặn bởi permission. Hãy giải thích với người dùng."
                     else:
                         try:
-                            result = self.manager.call(name, args)
+                            budget = max(1, int(deadline - time.time()))
+                            if budget <= 0:
+                                return "[ĐÃ DỪNG] hết thời gian chống treo của lượt này."
+                            if name in ("pip_install", "ensure_tool"):
+                                to = min(config.TOOL_TIMEOUT_PKG, budget)
+                            else:
+                                to = min(config.TOOL_TIMEOUT_FAST, budget)
+                            result = self.manager.call(name, args, timeout=to)
                         except Exception as e:
                             result = f"[LOI CHAY TOOL] {type(e).__name__}: {e}"
                     self._emit({"type": "tool_done", "name": name, "result": str(result)[:200]})
