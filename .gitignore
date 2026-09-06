@@ -1,3 +1,7 @@
 *
 !.gitignore
 !ts-on.sh
+!personal-agent/
+!personal-agent/**
+!personal-agent/providers/
+!personal-agent/providers/**
