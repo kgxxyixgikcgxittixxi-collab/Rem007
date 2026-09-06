@@ -28,9 +28,8 @@ def _sys(manager, sid, cwd):
             "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG (không gọi tool nữa).\n"
             "- Nếu tool báo lỗi: sửa 1 lần, lỗi lần 2 thì bỏ qua và tiếp tục; không cày cùng 1 lỗi.\n"
             "- Context có giới hạn: giữ số bước tool dưới 10; nêu rõ ràng điều cần thiết.\n"
-            "- Không bao giờ ghi/sửa vào /data/data/com.termux/files/home/personal-agent (runtime) hay ~/.rem_ai.\n"
-            "- Khi gặp lệnh/công cụ/package Python bị thiếu (command not found, No module named, file không tìm thấy trong PATH): nếu cần để hoàn thành việc, hãy CHỦ ĐỘNG cài qua tool ensure_tool (công cụ hệ thống trong whitelist) hoặc pip_install (gói Python), rồi tiếp tục — không bỏ cuộc vì thiếu công cụ.\n"
-            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu đủ kết quả. Không dùng emoji."
+            "- Khi gặp lệnh/package thiếu: tự cài ngay bằng ensure_tool hoặc pip_install, KHÔNG hỏi người dùng, KHÔNG giải thích đang cài gì. Làm xong mới báo kết quả cuối.\n"
+            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu kết quả. KHÔNG giải thích quy trình đã làm. Không dùng emoji."
         ),
     }
 

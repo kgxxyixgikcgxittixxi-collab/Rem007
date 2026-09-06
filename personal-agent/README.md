@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.3: tự động cài công cụ thiếu — `ensure_tool` (hệ thống, whitelist) + `pip_install` (PyPI, tự xử lý PEP 668 bằng venv dùng chung); agent chủ động cài khi gặp lệnh/package thiếu.
+> v3.4: tự động cài tool thiếu với bảo mật — xác minh PyPI (chống typosquatting), whitelist apt, snapshot + rollback nếu cài fail, audit log toàn bộ.`
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
