@@ -62,3 +62,35 @@ echo ""
 echo "=== CÀI XONG! Chạy:  $PY main.py  ==="
 echo "Lần đầu: gõ  /key gsk_...   rồi  /help  để bắt đầu."
 echo ""
+
+# ── 4. Cài lệnh `RemNav`/`Remtm` toàn hệ thống (kiểu opencode) ────────────
+echo "[i] Cài lệnh nhanh 'Remtm'..."
+BIN="$HOME/.local/bin"
+if [ -n "$PREFIX" ]; then
+    BIN="$PREFIX/bin"      # Termux
+fi
+mkdir -p "$BIN"
+SRC="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../Remtm"
+if [ ! -f "$SRC" ]; then
+    SRC="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/Remtm"
+fi
+if [ -f "$SRC" ]; then
+    cp "$SRC" "$BIN/Remtm"
+    chmod +x "$BIN/Remtm"
+    echo "[i] Đã cài:  Remtm  ->  $BIN/Remtm"
+    # Đảm bảo bin nằm trong PATH khi mở shell mới
+    case "$PATH" in
+        *"$BIN"*) ;;
+        *)  shellrc="$HOME/.bashrc"
+            if [ -f "$HOME/.zshrc" ]; then shellrc="$HOME/.zshrc"; fi
+            if ! grep -q "PATH=.*$BIN" "$shellrc" 2>/dev/null; then
+                echo "export PATH=\"\$PATH:$BIN\"" >> "$shellrc"
+                echo "[i] Đã thêm '$BIN' vào $shellrc (mở terminal mới là dùng được)"
+            fi ;;
+    esac
+    echo ""
+    echo ">>> Giờ chỉ cần gõ:  Remtm   (ở bất kỳ đâu)  🎉"
+else
+    echo "[!] Không tìm thấy file Remtm (bỏ qua bước cài lệnh nhanh)"
+fi
+echo ""
