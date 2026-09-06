@@ -5,6 +5,7 @@ ALLOW = {
 }
 ASK = {
     "bash", "write_file", "edit_file", "chdir", "web_fetch", "github_api",
+    "ensure_tool", "pip_install",
 }
 DENY = set()
 

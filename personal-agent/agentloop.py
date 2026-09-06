@@ -29,6 +29,7 @@ def _sys(manager, sid, cwd):
             "- Nếu tool báo lỗi: sửa 1 lần, lỗi lần 2 thì bỏ qua và tiếp tục; không cày cùng 1 lỗi.\n"
             "- Context có giới hạn: giữ số bước tool dưới 10; nêu rõ ràng điều cần thiết.\n"
             "- Không bao giờ ghi/sửa vào /data/data/com.termux/files/home/personal-agent (runtime) hay ~/.rem_ai.\n"
+            "- Khi gặp lệnh/công cụ/package Python bị thiếu (command not found, No module named, file không tìm thấy trong PATH): nếu cần để hoàn thành việc, hãy CHỦ ĐỘNG cài qua tool ensure_tool (công cụ hệ thống trong whitelist) hoặc pip_install (gói Python), rồi tiếp tục — không bỏ cuộc vì thiếu công cụ.\n"
             "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu đủ kết quả. Không dùng emoji."
         ),
     }

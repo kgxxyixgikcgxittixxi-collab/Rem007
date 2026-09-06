@@ -2,9 +2,19 @@ import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import fnmatch, glob as _glob, re, subprocess
+import fnmatch, glob as _glob, re, shutil, subprocess
 from mcplib import Server, Tool, schema, clamp
-from config import DIR, SHELL_TIMEOUT, MAX_TOOL_OUT
+from config import DIR, TMP, TERMUX, SHELL_TIMEOUT, MAX_TOOL_OUT
+
+PVENV = os.path.join(DIR, "venv")
+PVENV_PY = os.path.join(PVENV, "bin", "python")
+
+SYSTEM_TOOLS_OK = [
+    "git", "curl", "wget", "jq", "ripgrep", "rg", "tree", "htop", "ffmpeg",
+    "pandoc", "scrot", "xdotool", "zip", "unzip", "sqlite3", "tesseract",
+    "tldr", "bat", "fd", "fzf", "micro", "make", "cmake",
+]
+PYPI_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*(\[.*\])?(==[0-9A-Za-z.\-]+)?$")
 
 CWD = [os.path.expanduser("~")]
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -144,6 +154,66 @@ def chdir(path):
     return CWD[0]
 
 
+def ensure_tool(name, timeout=600):
+    """Kiểm tra công cụ hệ thống; nếu thiếu thì cài qua apt/pkg. Chỉ chấp nhận tên trong whitelist."""
+    name = (name or "").strip().lower()
+    if not name or name != re.sub(r"[^a-z0-9\-.]", "", name):
+        return "[LOI] tên công cụ không hợp lệ (chỉ chữ thường, số, dấu - và .)"
+    if name.startswith("-"):
+        return "[LOI] tên công cụ không hợp lệ"
+    if name not in SYSTEM_TOOLS_OK:
+        return f"[LOI] '{name}' không nằm trong danh sách tool được phép tự cài: {', '.join(SYSTEM_TOOLS_OK)}"
+    if shutil.which(name):
+        return f"[OK] {name} đã có sẵn tại {shutil.which(name)}"
+    if TERMUX:
+        cmd = ["pkg", "install", "-y", name]
+        label = "pkg"
+    else:
+        cmd = ["sudo", "apt-get", "install", "-y", name]
+        label = "sudo apt-get"
+    try:
+        r = subprocess.run(cmd, cwd=CWD[0], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"[LOI] cài {name} quá lâu (timeout {timeout}s)"
+    out = (r.stdout + "\n" + r.stderr).strip()
+    if r.returncode != 0:
+        return f"[LOI] {label} thất bại (exit {r.returncode}): {out[-800:]}"
+    if shutil.which(name):
+        return f"[OK] đã cài {name} → {shutil.which(name)}"
+    return f"[LOI] {label} chạy xong nhưng không thấy {name} trong PATH. Chi tiết: {out[-500:]}"
+
+
+def pip_install(pkg, timeout=600):
+    """Cài gói Python an toàn. Nếu hệ thống chặn (PEP 668/externally-managed) sẽ tạo venv dùng chung ~/.rem_ai/venv."""
+    name = (pkg or "").strip()
+    if not PYPI_SAFE.match(name):
+        return ("[LOI] tên gói không hợp lệ — chỉ nhận tên PyPI (vd requests, requests==2.31.0), "
+                "không nhận URL/git/script tùy ý.")
+    ok = [("python3", sys.executable)]
+    if os.path.isdir(PVENV) and os.path.isfile(PVENV_PY):
+        ok.append(("venv", PVENV_PY))
+    tried = []
+    for label, py in ok:
+        r = subprocess.run([py, "-m", "pip", "install", "--quiet", "--upgrade", name],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return f"[OK] đã cài {name} bằng {label} ({py})"
+        tried.append(f"{label}: {r.stderr[-300:] or r.stdout[-300:]}")
+    # PEP 668 external-managed → tạo venv dùng chung
+    try:
+        os.makedirs(PVENV, exist_ok=True)
+        subprocess.run([sys.executable, "-m", "venv", PVENV], capture_output=True, timeout=120)
+        r = subprocess.run([PVENV_PY, "-m", "pip", "install", "--quiet", "--upgrade", name],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return f"[OK] hệ thống chặn pip (PEP 668) → đã cài {name} vào venv ~/.rem_ai/venv. Dùng {PVENV_PY} để import trong script."
+        return f"[LOI] pip {name} thất bại kể cả trong venv: {r.stderr[-400:]}"
+    except subprocess.TimeoutExpired:
+        return f"[LOI] cài {name} quá lâu (timeout {timeout}s)"
+    except Exception as e:
+        return f"[LOI] tạo venv thất bại: {type(e).__name__}: {e}"
+
+
 TOOLS = [
     Tool("bash", "Chạy lệnh shell/terminal trên máy (bash -c). Dùng cho hầu hết việc: xem RAM/disk, chạy script, git, pip, cài gói...",
          schema({"command": {"type": "string", "description": "Lệnh shell cần chạy"}}), bash),
@@ -162,6 +232,10 @@ TOOLS = [
     Tool("cwd", "Xem thư mục làm việc hiện tại.", schema({}), cwd),
     Tool("chdir", "Đổi thư mục làm việc cho các lệnh bash sau đó.",
          schema({"path": {"type": "string"}}), chdir),
+    Tool("ensure_tool", "Kiểm tra công cụ hệ thống (vd jq, ffmpeg, pandoc...) đã có chưa; nếu thiếu sẽ tự cài bằng apt/pkg. Chỉ cài các tool trong whitelist.",
+         schema({"name": {"type": "string", "description": "tên công cụ, vd: jq, tree, ffmpeg"}}), ensure_tool),
+    Tool("pip_install", "Cài gói Python (PyPI) nếu script cần nhưng chưa có. Bị PEP 668 chặn thì tự tạo venv dùng chung ~/.rem_ai/venv.",
+         schema({"pkg": {"type": "string", "description": "tên gói PyPI, vd: requests hoặc requests==2.31.0"}}), pip_install),
 ]
 
 if __name__ == "__main__":

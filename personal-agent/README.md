@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.2: tự phát hiện model khả dụng từ API `/models` của Groq (model chết mặc định tự chuyển), compact/tóm tắt session hoạt động, tự restart extension khi MCP server crash, giữ log từng extension trong `~/.rem_ai/logs/`.
+> v3.3: tự động cài công cụ thiếu — `ensure_tool` (hệ thống, whitelist) + `pip_install` (PyPI, tự xử lý PEP 668 bằng venv dùng chung); agent chủ động cài khi gặp lệnh/package thiếu.
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
@@ -15,7 +15,7 @@ agentloop.py ── Agent loop: LLM → tool_calls → execute → lặp
    │
 extensions.py ── ExtensionManager: khám phá & gọi tool, tự restart khi mất kết nối
    │
-   ├── mcp_servers/developer  (9 tool)  bash, read/write/edit file, grep, glob, cwd...
+   ├── mcp_servers/developer  (11 tool)  bash, read/write/edit file, grep, glob, cwd, ensure_tool, pip_install...
    ├── mcp_servers/webtool    (3 tool)  web_search, web_fetch, github_api
    └── mcp_servers/memory     (2 tool)  remember, recall (graph.json)
 mcplib.py  ── Client/Server MCP over stdio (chuẩn MCP, chỉ dùng stdlib, không cần Rust)
