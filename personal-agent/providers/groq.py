@@ -73,7 +73,8 @@ def _post(body, model, timeout=30):
         return None
     n = len(ks)
     last = None
-    for _ in range(6):
+    start = time.time()
+    while time.time() - start < 75:  # tổng thời gian chờ/retry tối đa 75s
         now = time.time()
         choice = None
         for i in range(n):
@@ -83,8 +84,9 @@ def _post(body, model, timeout=30):
                 _RR[0] = (_RR[0] + 1) % n
                 break
         if choice is None:
+            # tất cả keys đang cooldown → chờ key sớm hết hạn nhất
             wake = min(_COOL.values())
-            d = max(0.5, min(25.0, wake - now))
+            d = max(1.0, min(20.0, wake - now))
             time.sleep(d)
             continue
         try:
@@ -99,6 +101,9 @@ def _post(body, model, timeout=30):
                 last = "RATE"
             else:
                 last = f"HTTP {r.status_code}"
+                # lỗi key (401) hoặc model — không phải rate, dừng nhanh
+                if r.status_code in (401, 403):
+                    break
         except Exception as e:
             last = type(e).__name__
     if last == "RATE":
@@ -114,21 +119,34 @@ def chat(msgs, tools=None):
         body["tools"] = tools
         body["tool_choice"] = "auto"
     chain = chat_models() + [m for m in fb_models() if m not in chat_models()]
-    for m in chain[:4]:
-        r = _post(body, m)
-        if r == "RATE":
-            return None
-        if r is not None:
-            val = r.json()["choices"][0]["message"]
-            return val
+    # nhiều vòng: nếu hết model bị rate-limit thì chờ backoff rồi thử lại
+    for attempt in range(4):
+        all_rate = True
+        for m in chain[:4]:
+            r = _post(body, m)
+            if r == "RATE":
+                last = "RATE"
+                continue
+            if r is not None:
+                return r.json()["choices"][0]["message"]
+            all_rate = False
+        # hết model nào còn dùng được tạm
+        if all_rate:
+            time.sleep(min(6 + attempt * 8, 45))
+            continue
+        return None
     return None
 
 
 def text(p, max_tokens=700, temp=0.2):
-    for m in clone_models()[:2]:
+    for m in clone_models()[:3]:
         r = _post({"messages": [{"role": "user", "content": p}], "max_tokens": max_tokens, "temperature": temp}, m, 20)
         if r is not None and r != "RATE" and r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
+            content = r.json()["choices"][0]["message"].get("content")
+            if content:
+                return content
+            # content rỗng → thử model kế tiếp
+            continue
     return ""
 
 

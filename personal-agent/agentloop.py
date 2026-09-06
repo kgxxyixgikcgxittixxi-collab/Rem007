@@ -89,13 +89,18 @@ class Agent:
                 msgs = sessions.compact(self.sid, msgs)
                 msgs = sessions.trim(msgs)
                 self._emit({"type": "llm", "step": step + 1, "turn": turn})
-                reply = groq.chat(msgs, tools=self.manager.schemas() or None)
-                if not reply:
-                    self._emit({"type": "retry"})
-                    time.sleep(3)
+                reply = None
+                # retry nhiều lần với backoff khi Groq không phản hồi (rate-limit/quota)
+                for _ in range(5):
+                    if self.cancel.is_set():
+                        return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
                     reply = groq.chat(msgs, tools=self.manager.schemas() or None)
+                    if reply:
+                        break
+                    self._emit({"type": "retry"})
+                    time.sleep(min(3 * (_ + 1), 20))  # 3s, 6s, 9s, 12s...
                 if not reply:
-                    return "[LOI] Groq không phản hồi (có thể hết keys/quota). Dùng /keys để kiểm tra."
+                    return "[LOI] Groq không phản hồi (quota/rate-limit). Chờ 1 lúc rồi gõ lại, hoặc /keys."
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
                     if turn > 1:
