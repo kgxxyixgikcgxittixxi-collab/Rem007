@@ -5,3 +5,7 @@
 !personal-agent/**
 !personal-agent/providers/
 !personal-agent/providers/**
+
+__pycache__/
+personal-agent/__pycache__/
+personal-agent/**/__pycache__/
