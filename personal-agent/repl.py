@@ -96,6 +96,8 @@ class Repl:
         elif t == "tool_done":
             r = (ev.get("result") or "").replace("\n", " ")[:100]
             self._status_msg = f"✓ {ev['name']} → {r}"
+        elif t == "checkpoint":
+            self._status_msg = f"💾 checkpoint bước {ev.get('step', '?')} đã lưu"
 
     def _spinner(self):
         i = 0

@@ -4,7 +4,8 @@ import config
 import sessions
 from providers import groq
 
-MAX_STEPS = 25
+MAX_STEPS = config.MAX_STEPS
+CHECKPOINT_EVERY = config.CHECKPOINT_EVERY
 
 
 def _sys(manager, sid, cwd):
@@ -121,7 +122,15 @@ class Agent:
                     {"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": result},
                 )
             msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
-        return "[DUNG] đã tới giới hạn số bước tool. Gõ /new để bắt đầu session mới."
+            if (step + 1) % CHECKPOINT_EVERY == 0:
+                try:
+                    cp = sessions.checkpoint(self.sid, step + 1, msgs)
+                    self._emit({"type": "checkpoint", "path": cp, "step": step + 1})
+                except Exception:
+                    pass
+        cp = sessions.load_checkpoint(self.sid)
+        note = f" (checkpoint: {cp.get('step', '?')} bước)" if cp else ""
+        return "[DUNG] đã tới giới hạn số bước tool. Gõ 'tiếp tục' để chạy tiếp từ checkpoint." + note
 
     def say(self, text):
         sessions.append(self.sid, {"role": "assistant", "content": text})
