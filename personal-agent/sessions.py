@@ -64,6 +64,28 @@ def remove(sid):
         return False
 
 
+def trim(msgs, cap=3000, total=9000):
+    """Giữ context gọn trước khi gọi LLM (như opencode): cắt nội dung quá dài, bớt message cũ."""
+    msgs = [dict(m) for m in msgs]
+    for i, m in enumerate(msgs):
+        c = m.get("content")
+        if isinstance(c, str) and len(c) > cap:
+            msgs[i]["content"] = c[:cap] + f"\n...[cắt {len(c) - cap} ký tự]"
+    keep = min(2, len(msgs))
+    tot = sum(len(m.get("content") or "") for m in msgs)
+    idx = 1 if msgs and msgs[0].get("role") == "system" else 0
+    guard = 0
+    while tot > total and idx < len(msgs) - keep and guard < 50:
+        guard += 1
+        c = msgs[idx].get("content")
+        if isinstance(c, str) and len(c) > 200:
+            cut = tot - total
+            msgs[idx]["content"] = c[: max(len(c) - cut, 200)]
+            tot = sum(len(m.get("content") or "") for m in msgs)
+        idx += 1
+    return msgs
+
+
 def compact(sid, msgs, budget=90000):
     text = "".join(
         json.dumps(m, ensure_ascii=False) for m in msgs if m.get("role") in ("user", "assistant")

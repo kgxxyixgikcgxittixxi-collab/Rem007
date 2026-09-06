@@ -7,6 +7,16 @@ from mcplib import Server, Tool, schema, clamp
 from config import DIR, SHELL_TIMEOUT, MAX_TOOL_OUT
 
 CWD = [os.path.expanduser("~")]
+ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+PROTECT = (os.path.realpath(ROOT), os.path.realpath(os.path.join(DIR, "..", ".rem_ai")))
+
+
+def _blocked(p):
+    rp = os.path.realpath(os.path.expanduser(p))
+    for base in PROTECT:
+        if rp == base or rp.startswith(base + os.sep):
+            return True
+    return False
 
 DANGER = [
     "rm -rf /", "rm -rf /*", "mkfs", "dd if=", "> /dev/sd", "chown -r 0",
@@ -32,7 +42,7 @@ def bash(command, timeout=SHELL_TIMEOUT):
     return clamp(out.strip() or "(không có output)", MAX_TOOL_OUT)
 
 
-def read_file(path, max_chars=40000):
+def read_file(path, max_chars=8000):
     if not os.path.exists(path):
         return f"[LOI] không tìm thấy file: {path}"
     if os.path.isdir(path):
@@ -45,6 +55,8 @@ def read_file(path, max_chars=40000):
 
 
 def write_file(path, content):
+    if _blocked(path):
+        return "[TU CHOI] không được ghi vào thư mục runtime/keys của agent"
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -53,6 +65,8 @@ def write_file(path, content):
 
 
 def edit_file(path, old, new):
+    if _blocked(path):
+        return "[TU CHOI] không được sửa file trong thư mục runtime/keys của agent"
     if not os.path.isfile(path):
         return f"[LOI] file không tồn tại: {path}"
     with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -132,7 +146,7 @@ TOOLS = [
     Tool("bash", "Chạy lệnh shell/terminal trên máy (bash -c). Dùng cho hầu hết việc: xem RAM/disk, chạy script, git, pip, cài gói...",
          schema({"command": {"type": "string", "description": "Lệnh shell cần chạy"}}), bash),
     Tool("read_file", "Đọc nội dung file văn bản.",
-         schema({"path": {"type": "string"}, "max_chars": {"type": "integer", "description": "giới hạn ký tự, mặc định 40000"}}), read_file),
+         schema({"path": {"type": "string"}, "max_chars": {"type": "integer", "description": "giới hạn ký tự, mặc định 8000"}}), read_file),
     Tool("write_file", "Ghi nội dung vào file (tạo mới hoặc ghi đè).",
          schema({"path": {"type": "string"}, "content": {"type": "string"}}), write_file),
     Tool("edit_file", "Sửa file: thay đoạn `old` bằng `new` (chính xác, có phân biệt hoa/thường).",

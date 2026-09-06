@@ -4,7 +4,7 @@ import config
 import sessions
 from providers import groq
 
-MAX_STEPS = 20
+MAX_STEPS = 25
 
 
 def _sys(manager, sid, cwd):
@@ -22,12 +22,14 @@ def _sys(manager, sid, cwd):
             f"Thư mục làm việc: {cwd}\nSession: {sid}\n\n"
             "CÁC CÔNG CỤ CÓ SẵN:\n"
             f"{tools}\n\n"
-            "LUẬT:\n"
-            "- Dùng tool khi cần thực tác thật (đọc file, chạy lệnh, tìm web...). KHÔNG bịa kết quả.\n"
-            "- Nếu tool báo lỗi: đề xuất cách sửa hoặc thử lại.\n"
-            "- Permission 'ask' sẽ hỏi người dùng — hãy giải thích ngắn lý do rồi gọi lại khi được chấp thuận.\n"
-            "- Khi đã đủ thông tin và xong việc: dừng gọi tool, trả lời kết quả tiếng Việt, ngắn gọn, thực tế.\n"
-            "- Không dùng emoji."
+            "LUẬT BẮT BUỘC:\n"
+            "- Làm đúng công việc, từng bước tiến tới KẾT QUẢ. KHÔNG tự ý đọc/lang thang thêm file ngoài yêu cầu.\n"
+            "- KHÔNG đọc lại/verify lại một file đã đọc xong. Dữ liệu cũ vẫn còn trong context.\n"
+            "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG (không gọi tool nữa).\n"
+            "- Nếu tool báo lỗi: sửa 1 lần, lỗi lần 2 thì bỏ qua và tiếp tục; không cày cùng 1 lỗi.\n"
+            "- Context có giới hạn: giữ số bước tool dưới 10; nêu rõ ràng điều cần thiết.\n"
+            "- Không bao giờ ghi/sửa vào /data/data/com.termux/files/home/personal-agent (runtime) hay ~/.rem_ai.\n"
+            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu đủ kết quả. Không dùng emoji."
         ),
     }
 
@@ -50,7 +52,11 @@ class Agent:
         msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
         for _ in range(MAX_STEPS):
             msgs = sessions.compact(self.sid, msgs)
+            msgs = sessions.trim(msgs)
             reply = groq.chat(msgs, tools=self.manager.schemas() or None)
+            if not reply:
+                time.sleep(3)
+                reply = groq.chat(msgs, tools=self.manager.schemas() or None)
             if not reply:
                 return "[LOI] Groq không phản hồi (có thể hết keys/quota). Dùng /keys để kiểm tra."
             tool_calls = reply.get("tool_calls") or []
