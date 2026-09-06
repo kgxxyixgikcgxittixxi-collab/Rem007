@@ -80,6 +80,13 @@ if [ -f "$SRC" ]; then
     # symlink lowercase để gõ `remtm` cũng được
     ln -sf "$BIN/Remtm" "$BIN/remtm"
     echo "[i] Đã cài:  Remtm + remtm  ->  $BIN/"
+    # cài thêm rem-rest (hẹn máy tự ngủ sau N phút nghỉ ngơi)
+    RR="$(dirname "$SRC")/rem-rest"
+    if [ -f "$RR" ]; then
+        cp "$RR" "$BIN/rem-rest"
+        chmod +x "$BIN/rem-rest"
+        echo "[i] Đã cài:  rem-rest  ->  $BIN/  (gõ: rem-rest 60 / rem-rest off)"
+    fi
     # Đảm bảo bin nằm trong PATH khi mở shell mới
     case "$PATH" in
         *"$BIN"*) ;;

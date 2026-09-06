@@ -73,8 +73,13 @@ class Agent:
         if self.cancel.is_set():
             return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
         if deadline and time.time() > deadline:
-            mm = config.MAX_TASK_SECONDS // 60
-            return f"[ĐÃ DỪNG] chạy quá {mm} phút (giới hạn chống treo). Gõ 'tiếp tục' để chạy thêm."
+            secs = config.MAX_TASK_SECONDS
+            if secs >= 60:
+                mm, ss = divmod(secs, 60)
+                s = f"{mm} phút" + (f" {ss} giây" if ss else "")
+            else:
+                s = f"{secs} giây"
+            return f"[ĐÃ DỪNG] chạy quá {s} (giới hạn chống treo). Gõ 'tiếp tục' để chạy thêm."
         return None
 
     def _cwd(self):

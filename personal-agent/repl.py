@@ -1,4 +1,4 @@
-import os, sys, time, threading, queue
+import subprocess, os, sys, time, threading, queue
 
 import config
 import sessions
@@ -282,6 +282,7 @@ class Repl:
                     "/auto    tự động — không hỏi (mặc định)",
                     "/safe    hỏi xác nhận trước tool ghi/bash/fetch",
                     "/stop    dừng agent đang xử lý (giữ session)",
+                    "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
                     "/debug   bật/tắt chế độ gỡ lỗi",
                     "/clear   xoá màn hình (hiện logo REM)",
                     "/keys    xem số Groq keys",
@@ -297,6 +298,20 @@ class Repl:
                 _p("⏹  Đang dừng agent…", "ye")
             else:
                 _p("Agent đang rảnh.", "dim")
+        elif cmd == "/rest" or cmd.startswith("/rest "):
+            try:
+                r = subprocess.run(["rem-rest"] + parts[1:],
+                                   capture_output=True, text=True, timeout=30)
+            except FileNotFoundError:
+                _p("Thiếu lệnh 'rem-rest'. Cài lại: bash install.sh", "rd")
+                return True
+            except Exception as e:
+                _p(f"Lỗi rem-rest: {type(e).__name__}: {e}", "rd")
+                return True
+            out = (r.stdout or "").strip()
+            if r.stderr and r.stderr.strip():
+                out += ("\n" if out else "") + r.stderr.strip()
+            _p("\n".join(f"  {ln}" for ln in out.splitlines()) or "(không có phản hồi)", "gr" if r.returncode == 0 else "ye")
         elif cmd == "/models":
             _p(f"Chat  : {', '.join(groq.chat_models()[:4]) or '(chưa có keys)'}", "cy")
             _p(f"Compact: {', '.join(groq.clone_models()[:2]) or '(chưa có keys)'}", "cy")

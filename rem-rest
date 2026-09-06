@@ -1,0 +1,89 @@
+#!/bin/bash
+# rem-rest — hẹn giờ cho máy TỰ NGỦ (suspend) sau N phút để nghỉ ngơi mắt/sức khỏe.
+#   rem-rest             → xem trạng thái timer hiện tại
+#   rem-rest 60          → hẹn máy ngủ sau 60 phút (mặc định 60)
+#   rem-rest off         → hủy timer
+# Test nội bộ: REM_REST_SEC=2 REM_REST_CMD=/bin/echo rem-rest 1   (2s, không suspend thật)
+set -u
+
+STATEDIR="${REMDIR:-$HOME/.rem_ai}"; mkdir -p "$STATEDIR"
+PIDFILE="$STATEDIR/rest-timer.pid"
+LEFTFILE="$STATEDIR/rest-left.txt"
+
+# Cho phép ghi đè khi test nội bộ (rút ngắn thời gian / không suspend thật)
+CMD="${REM_REST_CMD:-systemctl suspend}"
+
+DEFAULT_MIN=60
+
+_alive() {
+    [ -f "$PIDFILE" ] || return 1
+    local p; p=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+}
+
+_status() {
+    if _alive; then
+        local left
+        left=$(cat "$LEFTFILE" 2>/dev/null || echo "?")
+        echo "⏳ Máy sẽ tự NGỦ để nghỉ ngơi sau ~${left} phút nữa."
+        echo "   Hủy:  rem-rest off"
+    else
+        echo "😴 Chưa có timer nghỉ ngơi nào đang chạy."
+        echo "   Dùng: rem-rest 60   (hoặc số phút bất kỳ)"
+    fi
+}
+
+_cancel() {
+    if _alive; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE" "$LEFTFILE"
+        echo "Đã hủy timer nghỉ ngơi."
+    else
+        echo "Không có timer nào để hủy."
+    fi
+}
+
+_start() {
+    local MIN="${1:-$DEFAULT_MIN}"
+    case "$MIN" in
+        *[!0-9]*) echo "Lỗi: '$MIN' không phải số phút hợp lệ." >&2; exit 2 ;;
+    esac
+    [ "$MIN" -gt 0 ] 2>/dev/null || { echo "Lỗi: số phút phải > 0." >&2; exit 2; }
+
+    _cancel >/dev/null 2>&1
+
+    local WAIT PRE
+    if [ -n "${REM_REST_SEC:-}" ] && [ "${REM_REST_SEC:-}" -gt 0 ] 2>/dev/null; then
+        WAIT="$REM_REST_SEC"
+    else
+        WAIT=$((MIN * 60))
+    fi
+    if [ "$WAIT" -gt 300 ]; then PRE=$((WAIT - 300)); else PRE=0; fi
+    local LATER=$((WAIT - PRE))
+
+    # Timer chạy nền, tách biệt phiên terminal. Nhắc trước 5 phút rồi suspend.
+    setsid nohup bash -c "
+echo \$\$ > '$PIDFILE'
+echo '$MIN' > '$LEFTFILE'
+sleep $PRE
+if command -v notify-send >/dev/null 2>&1; then notify-send -a rem-rest 'Rem Rest' 'Máy sẽ ngủ sau 5 phút để nghỉ ngơi — gõ: rem-rest off nếu muốn hủy' 2>/dev/null || true; fi
+sleep $LATER
+$CMD" >/dev/null 2>&1 < /dev/null &
+
+    echo "⏳ Đã hẹn: máy sẽ TỰ NGỦ sau $MIN phút để nghỉ ngơi."
+    echo "   Hủy nếu cần tiếp tục:  rem-rest off"
+    echo "   Xem trạng thái:        rem-rest"
+}
+
+case "${1:-}" in
+    ""|status) _status ;;
+    off|cancel|stop) _cancel ;;
+    help|-h|--help)
+        echo "rem-rest — hẹn máy tự ngủ để nghỉ ngơi"
+        echo "  rem-rest         trạng thái"
+        echo "  rem-rest 60      ngủ sau 60 phút (mặc định)"
+        echo "  rem-rest 5       ngủ sau 5 phút"
+        echo "  rem-rest off     hủy timer"
+        ;;
+    *) _start "${1}" ;;
+esac
