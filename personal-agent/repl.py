@@ -23,14 +23,20 @@ def _p(s, col="cy", end="\n"):
 
 
 def _type(s, col="gr"):
+    # In theo từ (word) thay vì từng ký tự để KHÔNG làm vỡ chữ tiếng Việt nhiều byte
     if not sys.stdin.isatty() or config.DEBUG:
         _p(s, col)
         return
     try:
-        for ch in s:
-            print(ch, end="", flush=True)
+        import re as _re
+        parts = _re.split(r"(\s+)", s)
+        for part in parts:
+            if not part:
+                continue
+            # in cả nhóm ký tự liền mạch 1 lần (bảo toàn Unicode)
+            print(part, end="", flush=True)
             sys.stdout.write("\033[?25l")
-            time.sleep(T)
+            time.sleep(T if part.startswith((" ", "\n")) else T * 0.5)
     except Exception:
         _p(s, col)
     finally:
