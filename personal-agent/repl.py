@@ -11,12 +11,14 @@ C = {
     "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
     "cy": "\033[96m", "gr": "\033[92m", "ye": "\033[93m",
     "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
+    "clear": "\033[2J", "home": "\033[H",
 }
 T = 0.015
+CLEAR_SEQ = C["clear"] + C["home"]
 
 
 def _p(s, col="cy", end="\n"):
-    print(C.get(col, "") + s + C["reset"], end=end, flush=True)
+    print(C.get(col, "") + str(s) + C["reset"], end=end, flush=True)
 
 
 def _type(s, col="gr"):
@@ -33,6 +35,42 @@ def _type(s, col="gr"):
     finally:
         print("\033[?25h" + C["reset"])
     print()
+
+
+def _klines(logo, colors):
+    """Tô màu từng dòng logo để tạo hiệu ứng color-mè."""
+    out = []
+    lines = logo.strip("\n").split("\n")
+    for i, ln in enumerate(lines):
+        col = colors[i % len(colors)]
+        out.append(C.get(col, "") + ln + C["reset"])
+    return "\n".join(out)
+
+
+def _logo_banner():
+    logo = _klines(config.LOGO, ["rd", "ye", "gr", "cy", "mg", "bl"])
+    meta = (C["bold"] + C["bl"] + config.NAME + C["reset"] + "  v" + config.VERSION +
+            C["dim"] + "  ·  MCP-native  ·  Groq  ·  opencode-style" + C["reset"])
+    model = ""
+    try:
+        cm = groq.chat_models()
+        model = cm[0] if cm else "?"
+    except Exception:
+        model = "?"
+    kb_cm = ""
+    try:
+        c = groq.clone_models()
+        kb_cm = c[0] if c else "?"
+    except Exception:
+        kb_cm = "?"
+    line = C["reset"] + C["dim"] + ("─" * 40) + C["reset"]
+    return (
+        "\n" + C["home"] +
+        logo + "\n" + line + "\n" + meta + "\n" +
+        line + "\n" +
+        C["dim"] + "  Model: " + C["reset"] + C["gr"] + model + C["reset"] +
+        C["dim"] + "   Compact: " + C["reset"] + C["gr"] + kb_cm + C["reset"] + "\n"
+    )
 
 
 class Repl:
@@ -54,7 +92,13 @@ class Repl:
         return a in ("y", "yes", "ok", "cho", "phep", "1", "c")
 
     def _status(self):
-        _p("Extensions (MCP)", "bold")
+        print(CLEAR_SEQ)
+        try:
+            print(_logo_banner())
+        except Exception:
+            pass
+        print()
+        _p("Extensions (MCP)", "mg")
         print(self.manager.status())
         _p(f"\nTools ({len(self.manager.tool_names())})", "bold")
         print("  " + ", ".join(self.manager.tool_names()))
@@ -76,10 +120,12 @@ class Repl:
             print("  " + k[:14] + "..." + k[-6:])
         _p("Thêm key: /key gsk_...", "dim")
 
+    def _clear(self):
+        print(CLEAR_SEQ)
+
     def slash(self, line):
         cmd = line.strip()
         parts = cmd.split()
-        head = parts[0] if parts else ""
         if cmd == "/help":
             _p(
                 "\n".join([
@@ -94,11 +140,14 @@ class Repl:
                     "/auto    chạy tự động — không hỏi xác nhận (mặc định)",
                     "/safe    hỏi xác nhận trước tool ghi/đổi thư mục/fetch web",
                     "/debug   bật/tắt chế độ gỡ lỗi (hiện nội dung đầy đủ, không gõ chữ)",
+                    "/clear   xoá màn hình",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
                     "/exit    thoát",
                 ]), "dim",
             )
+        elif cmd == "/clear":
+            self._clear()
         elif cmd == "/models":
             _p(f"Chat  : {', '.join(groq.chat_models()[:4]) or '(chưa có keys)'}", "cy")
             _p(f"Compact: {', '.join(groq.clone_models()[:2]) or '(chưa có keys)'}", "cy")
@@ -149,10 +198,17 @@ class Repl:
         return True
 
     def run(self):
-        _p(f"{config.NAME} v{config.VERSION} — MCP-native (goose/opencode style). Gõ /help.", "bold")
+        self._clear()
+        try:
+            print(_logo_banner())
+        except Exception:
+            pass
+        _p(f"Gõ /help | /status | /models | /clear | /exit", "dim")
+        if not groq.keys():
+            _p(f"⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
         _p("Đang khởi chạy extensions...", "dim")
         self.manager.start_all()
-        self._status()
+        _p(f"  Sessions: {self.sid} | preset: {self.presets} | auto: {self.agent.perm.auto}", "dim")
         while True:
             try:
                 line = input("\nRem> ").strip()

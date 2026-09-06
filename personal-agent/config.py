@@ -8,7 +8,15 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.4"
+VERSION = "3.5"
+
+LOGO = r"""
+██████╗ ███████╗███╗   ███╗
+██╔══██╗██╔═══╝ ████╗ ████║
+██████╔╝██████╗ ██╔████╔██║
+██╔══██╗██╔═══╝ ██║╚██╔╝██║
+██║  ╚═╝███████╗██║ ╚═╝ ██║
+"""
 DEBUG = os.environ.get("REM_DEBUG", "0") == "1"
 MODEL_CHAT = "qwen/qwen3.8-27b"
 MODEL_CLONE = "openai/gpt-oss-120b"

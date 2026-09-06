@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.4: tự động cài tool thiếu với bảo mật — xác minh PyPI (chống typosquatting), whitelist apt, snapshot + rollback nếu cài fail, audit log toàn bộ.`
+> v3.5: Giao diện mới kiểu opencode — logo **REM** ASCII to nhiều màu + banner khởi động, lệnh `/clear`, install tự động cho người dùng mới. Bảo mật auto-install tool (PyPI verify + rollback + audit log) từ v3.4.
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
@@ -60,8 +60,18 @@ Key lưu trong `~/.rem_ai/rem.db`.
 /build       quay lại preset thường (hỏi xác nhận khi cần)
 /auto /safe  bật/tắt chế độ tự động xác nhận
 /debug       bật/tắt chế độ gỡ lỗi (hiện đầy đủ, không gõ chữ)
+/clear       xoá màn hình (hiện lại logo REM)
 /key /keys  quản lý Groq keys
 	exit      thoát
+```
+
+## Cài đặt nhanh cho người dùng mới
+```bash
+git clone https://github.com/kgxxyixgikcgxittixxi-collab/Rem007.git
+cd Rem007/personal-agent
+bash install.sh     # tự phát hiện Termux/PC, cài python + deps + tạo DB
+python3 main.py      # mở Rem Agent (hoặc python nếu ở Termux)
+/key gsk_...        # thêm Groq key, rồi /help
 ```
 
 ## License
