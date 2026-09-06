@@ -1,4 +1,4 @@
-import os, sys, time, re, json
+import os, sys, time, re, json, random as rd
 from providers import groq
 import memory, router, planner, executor, web, verifier
 from tools import pctool
@@ -7,6 +7,8 @@ pctool.VISION = groq.vision
 
 GRN, YLW, RED, CYN, BLD, RST = "\033[92m", "\033[93m", "\033[91m", "\033[96m", "\033[1m", "\033[0m"
 STATS = {"chat": 0, "gui": 0, "headless": 0, "tools": 0}
+GREETS = ("Xin chao Boss Rem! Em nghe ro nha.", "Day la Rem Agent - e san sang giup Boss.",
+          "Chao Boss! Em day, can gi cu gọi nha.", "Xin chao! Rem agent 24/7 som duong.")
 
 def brain(u):
     t0 = router.norm(u)
@@ -15,8 +17,10 @@ def brain(u):
     z = router.route(t0)
     STATS[z] = STATS.get(z, 0) + 1
     if z == "chat" and not router.is_act(u):
+        if router.is_greet(t0): return rd.choice(GREETS)
         d = planner.parse(groq.text(planner.SUP_P + "\nBoss: " + u))
-        if d and d.get("type") == "chat": return d.get("reply") or "..."
+        if d and d.get("type") == "chat" and len((d.get("reply") or "")) >= 2:
+            return d.get("reply")[:400]
     elif z in ("gui", "headless"):
         ze = ""
         for i in range(3):
@@ -32,21 +36,27 @@ def brain(u):
                 return "[XONG] da thuc hien"
             break
     h = memory.load(); h.append({"role": "user", "content": u}); memory.save(h[-1])
-    last = None
+    last = None; no_tool = False
     for _ in range(20):
-        msg = groq.chat(h, executor.FC)
-        if not msg: return "[!] groq loi."
+        msg = groq.chat(h, None if no_tool else executor.FC)
+        if not msg: return "[!] groq loi - kiem tra key."
         h.append({"role": "assistant", "content": msg.get("content") or ""}); memory.save(h[-1])
         calls = msg.get("tool_calls") or []
-        if not calls: return msg.get("content") or (last or "[!] het vong.")
+        content = msg.get("content") or ""
+        if not calls:
+            if content: return content
+            if not no_tool:
+                no_tool = True
+                continue
+            return "Em da nghe, nhung chua hieu y Boss. Thu dien dat lai nha."
         for tc in calls[:3]:
             fn = tc.get("function", {})
             try: a = json.loads(fn.get("arguments") or "{}")
             except Exception: a = {}
             tr = executor.run_toolcall(fn.get("name"), a, u, ro)
             h.append({"role": "tool", "tool_call_id": tc.get("id"), "content": tr[:1500]}); memory.save(h[-1])
-            if not msg.get("content"): last = tr[:400]
-    return "[!] het vong."
+            if not content: last = tr[:400]
+    return "Em da lam het 20 buoc ma chua xong - thu noi khac nha."
 
 def _say(t):
     if not sys.stdin or not sys.stdin.isatty():

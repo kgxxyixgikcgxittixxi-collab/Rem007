@@ -20,3 +20,7 @@ def is_stop(t):
             if t.rfind("khong", 0, i) != -1: return False
             return True
     return False
+GREET = ("hello", "hi ", "hi ban", "chao", "hey", "alo", "xin chao", "ban oi", "heo", "àn", "hí")
+def is_greet(t):
+    t = norm(t)
+    return any(g in t for g in GREET)
