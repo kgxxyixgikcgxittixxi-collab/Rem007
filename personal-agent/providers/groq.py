@@ -14,15 +14,24 @@ def add_key(k):
         return False
 def scan(t):
     return sum(1 for k in re.findall(r"gsk_[A-Za-z0-9]{40,}", t) if add_key(k))
+_RR = [0]
 def _post(body, model, timeout=30):
     ks = keys()
     if not ks: return None
-    try:
-        return requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {ks[0]}"},
-            json={"model": model, **body}, timeout=timeout)
-    except Exception:
-        return None
+    n = len(ks)
+    for i in range(n):
+        k = ks[(_RR[0] + i) % n]
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {k}"},
+                json={"model": model, **body}, timeout=timeout)
+            if r.status_code == 200:
+                _RR[0] = (_RR[0] + 1) % n
+                return r
+        except Exception:
+            continue
+    _RR[0] = (_RR[0] + 1) % n
+    return None
 def chat(msgs, tools=None):
     body = {"messages": msgs, "max_tokens": 4096}
     if tools: body["tools"] = tools; body["tool_choice"] = "auto"
