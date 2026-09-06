@@ -11,8 +11,13 @@ C = {
     "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
     "cy": "\033[96m", "gr": "\033[92m", "ye": "\033[93m",
     "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
+    "lm": "\033[92m",  # xanh lá chuối (lime) — dòng người dùng User>
+    "ob": "\033[34m",  # xanh biển đậm — dòng agent Rem>
     "clear": "\033[2J", "home": "\033[H",
 }
+# Prefix phân biệt rõ người dùng vs agent
+P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối
+P_AGENT = "\033[34mRem>\033[0m "       # xanh biển
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇"
@@ -29,7 +34,9 @@ def _type(s, col="gr"):
         return
     try:
         import re as _re
+        color_code = C.get(col, "")
         parts = _re.split(r"(\s+)", s)
+        sys.stdout.write(color_code)
         for part in parts:
             if not part:
                 continue
@@ -89,25 +96,32 @@ class Repl:
         self._agent.askfn = self._ask
 
     # ── sự kiện từ agent (chạy trong worker thread) ──
+    # Chỉ hiện 1 trạng thái ngắn gọn (giống opencode), không spam chi tiết từng bước
     def _on_ev(self, ev):
         t = ev.get("type")
-        if t == "thinking":
-            self._status_msg = f"bước {ev['step']}: đang suy luận…"
-        elif t == "llm":
-            self._status_msg = f"bước {ev['step']}: gọi LLM…"
+        if t == "tool_start":
+            n = ev.get("name", "")
+            nice = {
+                "read_file": "đang đọc file", "list_dir": "đang liệt kê thư mục",
+                "glob_files": "đang tìm file", "bash": "đang chạy lệnh",
+                "write_file": "đang ghi file", "edit_file": "đang sửa file",
+                "web_search": "đang tìm kiếm web", "web_fetch": "đang đọc web",
+                "remember": "đang ghi nhớ", "recall": "đang tra bộ nhớ",
+                "ensure_tool": "đang cài công cụ", "pip_install": "đang cài package",
+                "github_api": "đang gọi GitHub",
+            }.get(n, f"đang dùng {n}")
+            self._status_msg = nice
+        elif t in ("thinking", "llm"):
+            self._status_msg = "đang suy nghĩ"
         elif t == "retry":
-            self._status_msg = "call lại (rate-limit)…"
-        elif t == "tool_start":
-            self._status_msg = f"⚡ {ev['name']} {ev.get('args_note', '')}"
-        elif t == "tool_done":
-            r = (ev.get("result") or "").replace("\n", " ")[:100]
-            self._status_msg = f"✓ {ev['name']} → {r}"
-        elif t == "checkpoint":
-            self._status_msg = f"💾 checkpoint bước {ev.get('step', '?')} đã lưu"
+            self._status_msg = "mạng bận, đang thử lại"
         elif t == "turn":
-            self._status_msg = f"⟳ ĐỢT {ev['turn']}/{(config.MAX_TURNS if hasattr(config, 'MAX_TURNS') else 8)} — tiếp tục tự động…"
+            self._status_msg = "tiếp tục xử lý…"
         elif t == "turn_roll":
-            self._status_msg = f"⟳ hết đợt {ev['turn']}, tự chuyển đợt mới…"
+            self._status_msg = "đang chuyển lượt…"
+        elif t == "checkpoint":
+            self._status_msg = "đang lưu tiến độ…"
+        # bỏ qua tool_done để không spam "✓ xyz done"
 
     def _spinner(self):
         i = 0
@@ -149,6 +163,9 @@ class Repl:
                 self._busy = False
                 self._clear_spin_line()
                 if out:
+                    # Tiền tố Rem> màu xanh biển + nội dung trả lời của AGENT
+                    sys.stdout.write(P_AGENT)
+                    sys.stdout.flush()
                     _type(out, "gr")
                 self._pending = 0
 
@@ -287,11 +304,12 @@ class Repl:
         return True
 
     def _prompt_hint(self):
+        # Prompt là chỗ NGƯỜI DÙNG gõ → màu xanh lá chuối, tiền tố User>
         if self._busy:
-            return "⏳(câu mới sẽ chờ lượt) Rem> "
+            return "⏳(câu mới sẽ chờ lượt) " + P_USER
         if self._pending:
-            return f"⏳({self._pending} chờ) Rem> "
-        return "Rem> "
+            return f"⏳({self._pending} chờ) " + P_USER
+        return P_USER
 
     def run(self):
         self._clear()

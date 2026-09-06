@@ -77,7 +77,9 @@ fi
 if [ -f "$SRC" ]; then
     cp "$SRC" "$BIN/Remtm"
     chmod +x "$BIN/Remtm"
-    echo "[i] Đã cài:  Remtm  ->  $BIN/Remtm"
+    # symlink lowercase để gõ `remtm` cũng được
+    ln -sf "$BIN/Remtm" "$BIN/remtm"
+    echo "[i] Đã cài:  Remtm + remtm  ->  $BIN/"
     # Đảm bảo bin nằm trong PATH khi mở shell mới
     case "$PATH" in
         *"$BIN"*) ;;
