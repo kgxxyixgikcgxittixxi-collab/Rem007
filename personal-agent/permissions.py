@@ -11,8 +11,11 @@ DENY = set()
 
 class PermPolicy:
     def __init__(self):
-        self.auto = os.environ.get("REM_AUTO", "0") == "1"
+        self.auto = os.environ.get("REM_SAFE", "0") != "1"
         self.overrides = {}  # tool -> "allow"/"ask"/"deny"
+
+    def set_auto(self, on):
+        self.auto = on
 
     def policy(self, name):
         if name in self.overrides:

@@ -87,11 +87,17 @@ class Repl:
                     "/new     tạo session mới",
                     "/plan    chuyển sang preset PLAN (chỉ đọc, cấm ghi/bash/web_fetch)",
                     "/build   quay lại preset BUILD (hỏi quyền với tool nguy hiểm)",
+                    "/auto    chạy tự động — không hỏi xác nhận (mặc định)",
+                    "/safe    hỏi xác nhận trước tool ghi/đổi thư mục/fetch web",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
                     "/exit    thoát",
                 ]), "dim",
             )
+        elif cmd in ("/auto", "/safe"):
+            on = cmd == "/auto"
+            self.agent.perm.set_auto(on)
+            _p("Chế độ TỰ ĐỘNG: không hỏi xác nhận." if on else "Chế độ AN TOÀN: hỏi xác nhận trước tool ghi/bash/fetch.", "gr")
         elif cmd == "/status":
             self._status()
         elif cmd == "/sessions":
