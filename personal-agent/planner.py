@@ -5,9 +5,12 @@ from router import norm
 SUP_P = 'Bien cau thanh JSON {"type":"chat"|"task","reply":"...","actions":[...]}. chi hoi=>reply.'
 SUP_G = ('Clone GUI. CHI tra JSON task. Ops: open/goto/search_in/search/click/type/key/wait/look/social/close. '
          'VD "vao coc coc tim anime"=>[{"op":"open","app":"coccoc"},{"op":"wait","s":2},{"op":"search_in","site":"youtube","kw":"anime"}].')
-SUP_H = 'Clone HEADLESS. Ops: bash_read, reply. VD "kiem tra ram"=>[{"op":"bash_read","cmd":"free -h"}].'
-ALLOW = {"headless": {"bash_read", "reply"},
-         "gui": {"open", "close", "focus", "goto", "search", "search_in", "click", "type", "key", "wait", "look", "social", "see"}}
+SUP_H = ('Clone HEADLESS. Ops: bash_read, bash, read, write, edit, ls, glob, grep, web_search, web_open, reply. '
+         'VD "kiem tra ram"=>[{"op":"bash_read","cmd":"free -h"}]. '
+         'VD "ghi file hello.txt noi dung Xin chao"=>[{"op":"write","path":"hello.txt","content":"Xin chao"}]. '
+         'VD "tim kiem python la gi"=>[{"op":"web_search","q":"python la gi"}].')
+ALLOW = {"headless": {"bash_read", "bash", "reply", "read", "write", "edit", "ls", "glob", "grep", "web_search", "web_open"},
+         "gui": {"open", "close", "focus", "goto", "search", "search_in", "click", "type", "key", "wait", "look", "social", "see", "web_open"}}
 STOPW = {"vao","mo","mow","mở","truy","cap","app","giup","toi","tim","kiem","search","go","nhan","web","youtube",
          "facebook","tiktok","zalo","di","nhe","a","em","o","tren","may","coccoc","coc","cốc","google","roi","ban","la"}
 
@@ -31,7 +34,21 @@ def fallback(z, u, t):
     if z == "headless":
         tok = re.search(r"(ghp_[A-Za-z0-9]{10,}|github_pat_\S+)", u)
         if tok and "github" in t:
-            acts.append({"op": "bash_read", "cmd": f"curl -s -H 'Authorization: token {tok.group(0)}' https://api.github.com/user | head -c 500"})
+            return [{"op": "bash_read", "cmd": f"curl -s -H 'Authorization: token {tok.group(0)}' https://api.github.com/user | head -c 500"}]
+        mw = re.search(r"ghi file (\S+) noi dung (.+)", u, re.S | re.I)
+        if mw: return [{"op": "write", "path": mw.group(1), "content": mw.group(2).strip()}]
+        mrd = re.search(r"(?:doc|mo|hien thi) file (\S+)", u, re.I)
+        if mrd: return [{"op": "read", "path": mrd.group(1)}]
+        me = re.search(r"sua file (\S+).*?[\"'](.+?)[\"']\s*thanh\s*[\"'](.+?)[\"']", u, re.S | re.I)
+        if me: return [{"op": "edit", "path": me.group(1), "old": me.group(2), "new": me.group(3)}]
+        mls = re.search(r"(?:noi dung|danh sach file|file gi) ?(?:trong|o)?\s*(\S+)", u)
+        if mls and "file" in t: return [{"op": "ls", "path": mls.group(1)}]
+        qs = re.search(r"(?:tim kiem|search|tra cuu)\s+([\wẠ-ỹ ._/-]+)", u, re.I)
+        if qs: return [{"op": "web_search", "q": qs.group(1).strip()[:120]}]
+        CHECKS = {"ram": "free -h", "bo nho": "free -h", "dia": "df -h", "cpu": "lscpu | head -18", "he thong": "uname -a; uptime", "wifi": "dev 2>/dev/null || iwconfig 2>/dev/null | head -20"}
+        for k, c in CHECKS.items():
+            if k in t: return [{"op": "bash_read", "cmd": c}]
+        if "kiem tra" in t or "check" in t: return [{"op": "bash_read", "cmd": "df -h;free -h;uname -a"}]
         return acts
     m = re.search(r"https?://\S+", u)
     if m: acts.append({"op": "goto", "url": m.group(0)})
