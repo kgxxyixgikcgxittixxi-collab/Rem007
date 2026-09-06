@@ -1,4 +1,4 @@
-import json, time
+import json, time, threading
 
 import config
 import sessions
@@ -35,11 +35,23 @@ def _sys(manager, sid, cwd):
 
 
 class Agent:
-    def __init__(self, manager, perm, sid=None):
+    def __init__(self, manager, perm, sid=None, on_event=None):
         self.manager = manager
         self.perm = perm
         self.sid = sid or sessions.new()
         self.askfn = None
+        self.on_event = on_event
+        self.cancel = threading.Event()
+
+    def _emit(self, ev):
+        if self.on_event:
+            try:
+                self.on_event(ev)
+            except Exception:
+                pass
+
+    def stop(self):
+        self.cancel.set()
 
     def _cwd(self):
         try:
@@ -48,13 +60,19 @@ class Agent:
             return "?"
 
     def run(self, user_text):
+        self.cancel.clear()
         sessions.append(self.sid, {"role": "user", "content": user_text})
         msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
-        for _ in range(MAX_STEPS):
+        for step in range(MAX_STEPS):
+            if self.cancel.is_set():
+                return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+            self._emit({"type": "thinking", "step": step + 1})
             msgs = sessions.compact(self.sid, msgs)
             msgs = sessions.trim(msgs)
+            self._emit({"type": "llm", "step": step + 1})
             reply = groq.chat(msgs, tools=self.manager.schemas() or None)
             if not reply:
+                self._emit({"type": "retry"})
                 time.sleep(3)
                 reply = groq.chat(msgs, tools=self.manager.schemas() or None)
             if not reply:
@@ -80,12 +98,16 @@ class Agent:
                 },
             )
             for tc in tool_calls:
+                if self.cancel.is_set():
+                    return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
                 fn = tc.get("function") or {}
                 name = fn.get("name", "?")
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
                 except ValueError:
                     args = {}
+                args_note = str(args)[:120]
+                self._emit({"type": "tool_start", "name": name, "args": args, "args_note": args_note})
                 if not self.perm.decide(name, args, askfn=self.askfn):
                     result = f"[TU CHOI] Tool {name} bị chặn bởi permission. Hãy giải thích với người dùng."
                 else:
@@ -93,6 +115,7 @@ class Agent:
                         result = self.manager.call(name, args)
                     except Exception as e:
                         result = f"[LOI CHAY TOOL] {type(e).__name__}: {e}"
+                self._emit({"type": "tool_done", "name": name, "result": str(result)[:200]})
                 sessions.append(
                     self.sid,
                     {"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": result},
