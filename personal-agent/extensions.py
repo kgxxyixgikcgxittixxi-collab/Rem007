@@ -1,5 +1,6 @@
 import os, sys, subprocess
 
+import config
 from mcplib import Client
 
 
@@ -8,6 +9,8 @@ SPECS = [
     {"name": "webtool", "module": "webtool", "desc": "tìm web, đọc web, GitHub API"},
     {"name": "memory", "module": "memory_server", "desc": "bộ nhớ dài hạn graph.json"},
 ]
+
+LOGDIR = os.path.join(config.DIR, "logs")
 
 
 class Extension:
@@ -19,17 +22,21 @@ class Extension:
         self.error = ""
         self.client = None
         self.tools = []
+        self._logf = None
 
     def start(self):
         root = os.path.dirname(os.path.abspath(__file__))
         py = sys.executable
+        os.makedirs(LOGDIR, exist_ok=True)
+        self._logf = open(os.path.join(LOGDIR, self.name + ".log"), "a", encoding="utf-8")
         proc = subprocess.Popen(
             [py, "-m", "mcp_servers." + self.module],
             cwd=root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._logf,
             text=True,
+            start_new_session=True,
         )
         self.client = Client(proc)
         try:
@@ -51,6 +58,11 @@ class Extension:
         try:
             if self.client:
                 self.client.close()
+        except Exception:
+            pass
+        try:
+            if self._logf:
+                self._logf.close()
         except Exception:
             pass
 
@@ -94,7 +106,20 @@ class Manager:
         tm = self.tool_map()
         if name not in tm:
             return f"[LOI] tool '{name}' không tồn tại trong extension nào"
-        return tm[name][0].call(name, args, timeout)
+        ext, t = tm[name]
+        try:
+            return ext.call(name, args, timeout)
+        except ConnectionError:
+            try:
+                ext.close()
+            except Exception:
+                pass
+            ext.start()
+            if ext.enabled and any(x.get("name") == name for x in ext.tools):
+                return ext.call(name, args, timeout)
+            return f"[LOI] extension '{ext.name}' bị mất kết nối, đã restart nhưng không hồi phục"
+        except TimeoutError:
+            return f"[LOI] tool '{name}' chạy quá lâu (timeout)"
 
     def status(self):
         lines = []

@@ -1,7 +1,7 @@
 import os
 
 ALLOW = {
-    "read_file", "list_dir", "grep", "glob_files", "cwd", "web_search", "recall",
+    "read_file", "list_dir", "grep", "glob_files", "cwd", "web_search", "recall", "remember",
 }
 ASK = {
     "bash", "write_file", "edit_file", "chdir", "web_fetch", "github_api",

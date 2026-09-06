@@ -19,8 +19,10 @@ def _blocked(p):
     return False
 
 DANGER = [
-    "rm -rf /", "rm -rf /*", "mkfs", "dd if=", "> /dev/sd", "chown -r 0",
-    ":(){", "shutdown ", "reboot", "init 0", "mv / ", "chmod 777 /",
+    "rm -rf /", "rm -rf /*", "--no-preserve-root", "mkfs", "mkfs.", "dd if=", "dd of=",
+    "> /dev/sd", "of=/dev/sd", "chown -r 0", ":(){", "shutdown ", "reboot", "init 0",
+    "mv / ", "chmod 777 /", "chown -r /", "wipefs", "shred /dev/", "diskutil erase",
+    "> /etc/passwd", "chmod -r 777 /",
 ]
 
 

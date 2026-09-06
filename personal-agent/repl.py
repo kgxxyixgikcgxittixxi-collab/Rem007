@@ -78,22 +78,40 @@ class Repl:
 
     def slash(self, line):
         cmd = line.strip()
+        parts = cmd.split()
+        head = parts[0] if parts else ""
         if cmd == "/help":
             _p(
                 "\n".join([
                     "/help    trợ giúp",
                     "/status  xem extension + tool + session",
                     "/sessions liệt kê session cũ",
+                    "/models  xem model đang dùng (chat/compact)",
                     "/new     tạo session mới",
+                    "/del <id>  xoá 1 session cũ",
                     "/plan    chuyển sang preset PLAN (chỉ đọc, cấm ghi/bash/web_fetch)",
                     "/build   quay lại preset BUILD (hỏi quyền với tool nguy hiểm)",
                     "/auto    chạy tự động — không hỏi xác nhận (mặc định)",
                     "/safe    hỏi xác nhận trước tool ghi/đổi thư mục/fetch web",
+                    "/debug   bật/tắt chế độ gỡ lỗi (hiện nội dung đầy đủ, không gõ chữ)",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
                     "/exit    thoát",
                 ]), "dim",
             )
+        elif cmd == "/models":
+            _p(f"Chat  : {', '.join(groq.chat_models()[:4]) or '(chưa có keys)'}", "cy")
+            _p(f"Compact: {', '.join(groq.clone_models()[:2]) or '(chưa có keys)'}", "cy")
+        elif cmd == "/debug":
+            config.DEBUG = not config.DEBUG
+            _p(f"Chế độ gỡ lỗi: {'BẬT' if config.DEBUG else 'TẮT'}", "gr")
+        elif cmd == "/del":
+            if len(parts) < 2:
+                _p("Cú pháp: /del <session-id>  (xem /sessions)", "dim")
+            elif sessions.remove(parts[1]):
+                _p(f"Đã xoá session {parts[1]}", "gr")
+            else:
+                _p(f"Không xoá được session {parts[1]}", "rd")
         elif cmd in ("/auto", "/safe"):
             on = cmd == "/auto"
             self.agent.perm.set_auto(on)
@@ -147,4 +165,7 @@ class Repl:
                 if self.slash(line) is False:
                     break
                 continue
-            _type(self.agent.run(line), "gr")
+            try:
+                _type(self.agent.run(line), "gr")
+            except KeyboardInterrupt:
+                _p("\n[dừng bởi người dùng — trạng thái lệnh có thể dang dở]", "ye")

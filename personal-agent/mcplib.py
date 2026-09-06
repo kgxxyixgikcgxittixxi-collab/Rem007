@@ -107,11 +107,8 @@ class Server:
                         if not isinstance(args, dict):
                             args = {"value": args}
                         text = tool.run(args)
-                        resp["result"] = (
-                            {"content": [{"type": "text", "text": text}]}
-                            if not text.startswith("[TOOL LOI]")
-                            else {"content": [{"type": "text", "text": text}], "isError": True}
-                        )
+                        is_err = text.startswith(("[TOOL LOI]", "[LOI]", "[TU CHOI]"))
+                        resp["result"] = {"content": [{"type": "text", "text": text}], "isError": is_err}
                 elif method == "shutdown":
                     resp["result"] = None
                 else:
@@ -132,30 +129,46 @@ class Client:
         self._reader.start()
 
     def _loop(self):
-        while True:
-            msg = recv_msg(self.proc.stdout)
-            if msg is None:
-                break
-            if isinstance(msg, dict) and msg.get("id") is not None:
-                with self._lock:
-                    entry = self._pending.pop(msg["id"], None)
-                if entry:
-                    entry[1][0] = msg
-                    entry[0].set()
+        try:
+            while True:
+                msg = recv_msg(self.proc.stdout)
+                if msg is None:
+                    break
+                if isinstance(msg, dict) and msg.get("id") is not None:
+                    with self._lock:
+                        entry = self._pending.pop(msg["id"], None)
+                    if entry:
+                        entry[1][0] = msg
+                        entry[0].set()
+        finally:
+            with self._lock:
+                pend, self._pending = self._pending, {}
+                dead = self.proc.poll() is not None
+            err = RuntimeError("MCP server đã đóng kết nối" + (f" (exit {self.proc.returncode})" if dead else ""))
+            for fut, holder in pend.values():
+                holder[1] = err
+                fut.set()
 
     def request(self, method, params=None, timeout=120):
         with self._lock:
             self._id += 1
             mid = self._id
             fut = threading.Event()
-            holder = [None]
+            holder = [None, None]
             self._pending[mid] = (fut, holder)
         data = {"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}
-        send_msg(self.proc.stdin, data)
+        try:
+            send_msg(self.proc.stdin, data)
+        except Exception as e:
+            with self._lock:
+                self._pending.pop(mid, None)
+            raise ConnectionError(f"Không thể gửi tới MCP server: {e}")
         if not fut.wait(timeout):
             with self._lock:
                 self._pending.pop(mid, None)
             raise TimeoutError(f"MCP timeout: {method}")
+        if holder[1] is not None:
+            raise holder[1]
         resp = holder[0]
         if resp is None:
             raise RuntimeError(f"MCP no response: {method}")
