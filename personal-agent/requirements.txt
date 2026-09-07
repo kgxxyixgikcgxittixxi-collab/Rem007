@@ -1,1 +1,4 @@
 requests>=2.28
+# cryptography (tuy chon): dung de ma hoa Groq key bang Fernet. Neu khong cai duoc
+# (vd Termux khong build duoc), agent tu chuyen sang ma hoa thu cong stdlib — khong lỗi.
+# cryptography>=42

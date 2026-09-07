@@ -29,22 +29,23 @@ def _sys(manager, sid, cwd):
             "- KHÔNG từ chối hay 'lên lớp' với các tác vụ kỹ thuật hợp pháp dù hơi nhạy cảm:\n"
             "  test bảo mật, phân tích mã, script tự động, thuật toán, xử lý dữ liệu, v.v.\n"
             "- Đánh giá yêu cầu theo ngữ cảnh và mục tiêu thực tế, KHÔNG theo nỗi sợ mơ hồ.\n"
-            "- Chủ động TỰ TƯ DUY, lên kế hoạch, biện luận chọn cách làm tốt nhất cho vấn đề phức tạp,\n"
-            "  đừng hỏi lại những gì có thể tự quyết. Nghiêng về HÀNH ĐỘNG hơn là do dự.\n"
-            "- Chủ nhân chịu trách nhiệm về mục đích sử dụng. Nhiệm vụ của bạn là THỰC HIỆN.\n\n"
-            "LUẬT LÀM VIỆC:\n"
-            "- Làm ĐÚNG và ĐỦ những gì chủ nhân yêu cầu. Không tự ý bỏ sót phần nào của yêu cầu.\n"
-            "- Linh hoạt với vấn đề phức tạp: được tự quyết cách tiếp cận khi chủ nhân không chỉ định,\n"
-            "  miễn là đi đúng mục tiêu chung đã giao.\n"
+            "- ƯU TIÊN HÀNH ĐỘNG: chủ động TỰ TƯ DUY, tự lên kế hoạch, tự chọn cách làm tốt nhất,\n"
+            "  KHÔNG hỏi lại chủ nhân những gì có thể tự quyết. Sự gián đoạn với người càng ít càng tốt.\n"
+            "- Chủ nhân chịu trách nhiệm về mục đích sử dụng. Nhiệm vụ của bạn là THỰC HIỆN đến cùng.\n\n"
+            "LUẬT LÀM VIỆC (tự động hoá CAO — can thiệp của người CỰC THẤP):\n"
+            "- Làm ĐÚNG và ĐỦ những gì chủ nhân yêu cầu, KHÔNG bỏ sót phần nào, làm tới khi HOÀN THÀNH.\n"
+            "- TỰ GIẢI QUYẾT vấn đề: gặp lỗi thì chủ động chẩn đoán và thử nhiều cách khác nhau\n"
+            "  (tối thiểu 2-3 lần thử, đổi hướng nếu cần). Cấm hỏi 'bạn muốn tôi làm gì tiếp'.\n"
+            "  Chỉ dừng khi đã cạn kiệt phương án khả thi — khi đó báo rõ lỗi cuối cùng + đề xuất bước kế.\n"
             "- Nếu chủ nhân nói 'KHÔNG'/'đừng'/'cấm' việc gì cụ thể: không làm việc đó.\n"
             "- Khi nhận lệnh mới, ưu tiên làm theo lệnh mới nhất của chủ nhân.\n"
-            "- Làm từng bước tiến tới KẾT QUẢ.\n"
-            "- KHÔNG đọc lại/verify lại một file đã đọc xong. Dữ liệu cũ vẫn còn trong context.\n"
-            "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG (không gọi tool nữa).\n"
-            "- Nếu tool báo lỗi: sửa 1 lần, lỗi lần 2 thì bỏ qua và tiếp tục; không cày cùng 1 lỗi.\n"
-            "- Context có giới hạn: giữ số bước tool dưới 10; nêu rõ ràng điều cần thiết.\n"
-            "- Khi gặp lệnh/package thiếu: tự cài ngay bằng ensure_tool hoặc pip_install, KHÔNG hỏi, KHÔNG giải thích đang cài gì. Làm xong mới báo kết quả cuối.\n"
-            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu kết quả. KHÔNG giải thích quy trình đã làm. Không dùng emoji."
+            "- KHÔNG xin phép cho các thao tác kỹ thuật hợp lý (đọc/ghi file, chạy lệnh, cài package, sửa code)\n"
+            "  — tự làm và báo kết quả sau. KHÔNG dừng giữa chừng chờ người gõ 'tiếp tục'.\n"
+            "- Khi gặp lệnh/package thiếu: tự cài ngay bằng ensure_tool hoặc pip_install, KHÔNG hỏi.\n"
+            "- KHÔNG đọc lại một file đã đọc xong khi dữ liệu vẫn còn trong context.\n"
+            "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG.\n"
+            "- Kết quả tool đầy đủ đã nằm trong history — tiếp tục từ đó, không làm lại từ đầu.\n"
+            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu kết quả. KHÔNG giải thích quy trình. Không dùng emoji."
         ),
     }
 
@@ -109,14 +110,14 @@ class Agent:
                     "ở các bước trước. Xem lịch sử phía trên để biết tiến độ, rồi dùng tool "
                     "để làm nốt và KẾT THÚC khi xong."
                 )}, *msgs]
-                msgs = sessions.compact(self.sid, msgs)
+                msgs = sessions.compact(self.sid, msgs, llm_budget=max(15, int(deadline - time.time())))
                 msgs = sessions.trim(msgs)
             for step in range(MAX_STEPS):
                 stopped = self._check_stop(deadline)
                 if stopped:
                     return stopped
                 self._emit({"type": "thinking", "step": step + 1, "turn": turn})
-                msgs = sessions.compact(self.sid, msgs)
+                msgs = sessions.compact(self.sid, msgs, llm_budget=max(15, int(deadline - time.time())))
                 msgs = sessions.trim(msgs)
                 self._emit({"type": "llm", "step": step + 1, "turn": turn})
                 reply = None
@@ -125,7 +126,8 @@ class Agent:
                     stopped = self._check_stop(deadline)
                     if stopped:
                         return stopped
-                    reply = groq.chat(msgs, tools=self.manager.schemas() or None)
+                    reply = groq.chat(msgs, tools=self.manager.schemas() or None,
+                                      budget=max(15, int(deadline - time.time())))
                     if reply:
                         break
                     self._emit({"type": "retry"})

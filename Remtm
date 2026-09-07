@@ -32,13 +32,25 @@ fi
 
 cd "$APP" || { echo "[Remtm] Không tìm thấy thư mục agent: $APP"; exit 1; }
 
-if command -v python3 >/dev/null 2>&1; then
-    PY=python3
-elif command -v python >/dev/null 2>&1; then
-    PY=python
-else
-    echo "[Remtm] Thiếu python3. Hãy cài rồi chạy lại (xem install.sh)."
-    exit 1
+# Chọn python có sẵn package 'requests' (agent bắt buộc cần). Nếu python mặc định thiếu
+# thì tự tìm sang các python khác (vd Python trong Termux / hệ thống) trước khi chạy.
+PY=""
+for _cand in python3 python /data/data/com.termux/files/usr/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c "import requests" >/dev/null 2>&1; then
+        PY="$_cand"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PY=python3
+    elif command -v python >/dev/null 2>&1; then
+        PY=python
+    else
+        echo "[Remtm] Thiếu python3. Hãy cài rồi chạy lại (xem install.sh)."
+        exit 1
+    fi
+    echo "[Remtm] Cảnh báo: $PY chưa có package 'requests' (cài bằng: pip install requests)." >&2
 fi
 
 exec "$PY" main.py "$@"

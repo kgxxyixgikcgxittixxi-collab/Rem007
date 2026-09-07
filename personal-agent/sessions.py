@@ -111,7 +111,7 @@ def trim(msgs, total=CTX_TOTAL, cap=CTX_CAP):
     return msgs
 
 
-def compact(sid, msgs, budget=SUM_BUDGET, msg_cap=SUM_AT):
+def compact(sid, msgs, budget=SUM_BUDGET, msg_cap=SUM_AT, llm_budget=None):
     """Tóm tắt thông minh khi context vượt ngưỡng ký tự HOẶC số message.
     Tính cả tool messages. Giữ lại system + các message cuối, tóm tắt phần cũ.
     Nếu LLM tóm tắt fail → fallback về trim cứng để không tràn."""
@@ -138,7 +138,7 @@ def compact(sid, msgs, budget=SUM_BUDGET, msg_cap=SUM_AT):
         "mục tiêu đang làm, tiến độ, file/đường dẫn đã tạo/sửa, lỗi gặp phải, quyết định kỹ thuật. "
         "BỎ chi tiết vụn vặt.\n\nHội thoại:\n" + dump[:15000]
     )
-    summary = groq.text(prompt, max_tokens=600)
+    summary = groq.text(prompt, max_tokens=600, budget=llm_budget)
     if summary:
         return sys_msg + [{"role": "user", "content": f"[TÓM TẮT NGỮ CẢNH]\n{summary}"}] + keep
     # tóm tắt fail → fallback cứng để đảm bảo không tràn
