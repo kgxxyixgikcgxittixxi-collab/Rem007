@@ -16,11 +16,21 @@ C = {
     "clear": "\033[2J", "home": "\033[H",
 }
 # Prefix phân biệt rõ người dùng vs agent
-P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối
+P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối (chỉ tiền tố, nội dung để trắng)
 P_AGENT = "\033[34mRem>\033[0m "       # xanh biển
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
-SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇"
+# Bộ khung spinner của opencode (packages/tui/src/component/spinner.tsx)
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Nhãn tool theo phong cách opencode (InlineTool/ToolStatusTitle)
+_TOOL_LABEL = {
+    "read_file": "Read", "write_file": "Write", "edit_file": "Edit",
+    "bash": "Bash", "list_dir": "List", "glob_files": "Glob",
+    "grep": "Grep", "web_search": "WebSearch", "web_fetch": "WebFetch",
+    "remember": "Remember", "recall": "Recall", "ensure_tool": "Setup",
+    "pip_install": "PyPI", "github_api": "GitHub", "task": "Task",
+    "log": "Log", "kill": "Kill",
+}
 
 
 def _p(s, col="cy", end="\n"):
@@ -78,6 +88,24 @@ def _logo_banner():
             C["dim"] + "   Compact: " + C["reset"] + C["gr"] + c + C["reset"] + "\n")
 
 
+def _tool_title(ev):
+    """Tiêu đề tool kiểu opencode: 'Bash  —  $ ls -la'."""
+    name = ev.get("name", "?") if isinstance(ev, dict) else "?"
+    note = ""
+    args = ev.get("args") or {}
+    if isinstance(args, dict):
+        for k in ("command", "path", "query", "url", "pattern", "filename", "name", "file", "dir"):
+            v = args.get(k)
+            if v not in (None, ""):
+                note = str(v)
+                break
+    label = _TOOL_LABEL.get(name, name)
+    if name == "bash" and note:
+        note = "$ " + note
+    note = (note or "")[:72]
+    return f"{label}  —  {note}" if note else label
+
+
 class Repl:
     def __init__(self, manager):
         self.manager = manager
@@ -90,6 +118,8 @@ class Repl:
         self._status_since = 0.0
         self._spin_start = 0.0
         self._spin_on = False
+        self._tool_rows = []      # các dòng tool đã xong (giống timeline opencode)
+        self._cur_title = ""
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -98,7 +128,7 @@ class Repl:
         self._agent.askfn = self._ask
 
     # ── sự kiện từ agent (chạy trong worker thread) ──
-    # Chỉ hiện 1 trạng thái ngắn gọn (giống opencode), không spam chi tiết từng bước
+    # Trình bày theo kiểu timeline opencode: mỗi tool = 1 dòng "✓ Bash — $ ls -la"
     def _set_status(self, msg):
         self._status_msg = msg
         self._status_since = time.time()
@@ -106,21 +136,14 @@ class Repl:
     def _on_ev(self, ev):
         t = ev.get("type")
         if t == "tool_start":
-            n = ev.get("name", "")
-            nice = {
-                "read_file": "đang đọc file", "list_dir": "đang liệt kê thư mục",
-                "glob_files": "đang tìm file", "bash": "đang chạy lệnh",
-                "write_file": "đang ghi file", "edit_file": "đang sửa file",
-                "web_search": "đang tìm kiếm web", "web_fetch": "đang đọc web",
-                "remember": "đang ghi nhớ", "recall": "đang tra bộ nhớ",
-                "ensure_tool": "đang cài công cụ", "pip_install": "đang cài package",
-                "github_api": "đang gọi GitHub",
-            }.get(n, f"đang dùng {n}")
-            self._set_status(nice)
+            self._cur_title = _tool_title(ev)
+            self._set_status(self._cur_title)
         elif t == "tool_done":
             r = (ev.get("result") or "")
-            if r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]")):
-                self._set_status(f"⚠ {ev.get('name', '?')}: báo lỗi, đang xử lý tiếp")
+            ok = not r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]"))
+            self._tool_rows.append(((("✓ " if ok else "✗ ") + self._cur_title), not ok))
+            if len(self._tool_rows) > 14:      # giữ tối đa, không spam màn hình
+                self._tool_rows.pop(0)
         elif t in ("thinking", "llm"):
             self._set_status("đang suy nghĩ")
         elif t == "retry":
@@ -131,7 +154,7 @@ class Repl:
             self._set_status("đang chuyển lượt…")
         elif t == "checkpoint":
             self._set_status("đang lưu tiến độ…")
-        # bỏ qua tool_done để không spam "✓ xyz done"
+        # bỏ qua tool_done để không in "✓ xyz done" chồng lên — chỉ lưu vào _tool_rows
 
     def _spinner(self):
         i = 0
@@ -142,7 +165,7 @@ class Repl:
             f = SPIN[i % len(SPIN)]
             el = int(time.time() - self._spin_start)
             wait = time.time() - self._status_since
-            base = f"{f}  {self._status_msg}" if self._status_msg else f
+            base = f"  {self._status_msg}" if self._status_msg else ""
             if el >= 60:
                 base += f"  [{el // 60}p{el % 60:02d}s]"
             else:
@@ -152,9 +175,10 @@ class Repl:
                 col = "\033[91m"
             else:
                 col = "\033[36m"
-            sys.stdout.write("\r" + col + base[:160] + "\033[0m\033[K")
+            # kiểu opencode: frame spinner màu + nội dung mờ
+            sys.stdout.write("\r" + col + f + C["dim"] + base[:150] + C["reset"] + "\033[K")
             sys.stdout.flush()
-            time.sleep(0.09)
+            time.sleep(0.08)
             i += 1
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
@@ -194,6 +218,8 @@ class Repl:
                 self._busy = True
                 self._spin_on = True
                 self._set_status("đang bắt đầu")
+                self._tool_rows = []
+                self._cur_title = ""
                 spin = threading.Thread(target=self._spinner, daemon=True)
                 spin.start()
                 try:
@@ -204,11 +230,16 @@ class Repl:
                 self._busy = False
                 spin.join(timeout=1)      # đợi spinner bỏ dòng cuối xong
                 self._clear_spin_line()   # rồi mới in tránh bị đè "Rem>"
+                # timeline tool đã xong (giống opencode: "✓ Bash — $ cmd")
+                for row, is_err in self._tool_rows:
+                    _p("  " + row, "rd" if is_err else "dim")
                 if out:
                     # Tiền tố Rem> màu xanh biển + nội dung trả lời của AGENT
                     sys.stdout.write(P_AGENT)
                     sys.stdout.flush()
                     _type(out, "ob")
+                    # Đánh dấu rõ: AI ĐÃ TRẢ LỜI XONG → hiện ngay "Rem>" để người dùng biết
+                    print(C["ob"] + "Rem>" + C["reset"] + C["dim"] + "  (đã trả lời xong)" + C["reset"], flush=True)
                 self._pending = 0
 
     # ── câu hỏi quyền (safe mode): chạy trong worker, hỏi trực tiếp ──
@@ -402,9 +433,9 @@ class Repl:
                     self.q.put(("quit", None))
                     break
                 continue
-            # Tô lại dòng người gõ màu xanh lá (thay echo trắng của input) + prefix User>
+            # Tô lại dòng người gõ: CHỈ tiền tố "User>" màu xanh lá, nội dung để trắng (giống Rem>)
             sys.stdout.write("\033[1A\r\033[2K")
-            sys.stdout.write(C["lm"] + "User> " + line + C["reset"] + "\n")
+            sys.stdout.write(C["lm"] + "User> " + C["reset"] + line + "\n")
             sys.stdout.flush()
             if self._busy:
                 self._pending += 1

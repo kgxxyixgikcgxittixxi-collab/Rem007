@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.18"
+VERSION = "3.19"
 
 LOGO = r"""
  ____  _____ __  __ 
