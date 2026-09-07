@@ -1,4 +1,4 @@
-import os, re, sqlite3, threading, time
+import os, re, sqlite3, threading, time, json
 import requests
 
 from config import DIR, MODEL_PREF_CHAT, MODEL_PREF_CLONE, MODEL_PREF_VISION, MODEL_PREF_FB
@@ -333,12 +333,112 @@ def chat(msgs, tools=None, budget=None):
             if r is not None:
                 return r.json()["choices"][0]["message"]
             all_rate = False
-        # hết model nào còn dùng được tạm → backoff rồi thử lại cho tới hết budget
+# hết model nào còn dùng được tạm → backoff rồi thử lại cho tới hết budget
+        if all_rate:
+            wait = min(3 + attempt * 3, 15)
+            time.sleep(max(0.0, min(wait, end - time.time())))
+            continue
+        return None
+    return None
+
+
+def _iter_stream(r, on_delta):
+    """Tiêu thụ response stream Groq → message cuối. on_delta(ev) nhận
+    {"type":"content"|"thinking","text":...} để UI hiện tiến độ chữ trực tiếp."""
+    acc = {"content": "", "thinking": "", "tc": []}
+
+    def emit(kind, s):
+        if on_delta and s:
+            try:
+                on_delta({"type": kind, "text": s})
+            except Exception:
+                pass
+
+    try:
+        for raw in r.iter_lines():
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="replace")
+            data = line[5:].strip() if line.startswith("data:") else line.strip()
+            if not data:
+                continue
+            if data == "[DONE]":
+                break
+            try:
+                d = json.loads(data)
+            except Exception:
+                continue
+            ch = (d.get("choices") or [{}])[0]
+            delta = ch.get("delta") or {}
+            if delta.get("reasoning_content"):
+                acc["thinking"] += delta["reasoning_content"]
+                emit("thinking", delta["reasoning_content"])
+            if delta.get("content"):
+                acc["content"] += delta["content"]
+                emit("content", delta["content"])
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                while len(acc["tc"]) <= idx:
+                    acc["tc"].append({"id": "", "name": "", "args": ""})
+                fn = tc.get("function") or {}
+                acc["tc"][idx]["id"] += tc.get("id") or ""
+                acc["tc"][idx]["name"] += fn.get("name") or ""
+                acc["tc"][idx]["args"] += fn.get("arguments") or ""
+    except Exception:
+        return None
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+    tc = []
+    for frag in acc["tc"]:
+        try:
+            args = json.loads(frag["args"] or "{}")
+        except Exception:
+            args = {}
+        tc.append({"id": frag["id"], "type": "function",
+                   "function": {"name": frag["name"], "arguments": json.dumps(args, ensure_ascii=False)}})
+    msg = {"role": "assistant"}
+    if acc["content"]:
+        msg["content"] = acc["content"]
+    if acc["thinking"]:
+        msg["reasoning_content"] = acc["thinking"]
+    if tc:
+        msg["tool_calls"] = tc
+    if acc["content"] or acc["thinking"] or tc:
+        return msg
+    return None
+
+
+def chat_stream(msgs, tools=None, budget=None, on_delta=None):
+    """Gọi Groq dạng STREAM — UI thấy chữ/tiến độ đang chảy, không bị 'treo im'.
+    Trả message cuối giống chat(), kèm on_delta để cập nhật tiến độ."""
+    body = {"messages": msgs, "max_tokens": 4096, "stream": True}
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    chain = chat_models() + [m for m in fb_models() if m not in chat_models()]
+    end = time.time() + (budget if budget and budget > 0 else 75)
+    for attempt in range(4):
+        if time.time() >= end:
+            return None
+        all_rate = True
+        for m in chain[:4]:
+            if time.time() >= end:
+                break
+            r = _post(body, m, budget=max(1, end - time.time()), timeout=45)
+            if r == "RATE":
+                continue
+            if r is None:
+                all_rate = False
+                continue
+            all_rate = False
+            return _iter_stream(r, on_delta)
         if all_rate:
             wait = min(6 + attempt * 8, 45)
             time.sleep(max(0.0, min(wait, end - time.time())))
             continue
-        return None
     return None
 
 

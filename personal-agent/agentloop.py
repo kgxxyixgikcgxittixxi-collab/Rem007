@@ -8,6 +8,14 @@ MAX_STEPS = config.MAX_STEPS
 CHECKPOINT_EVERY = config.CHECKPOINT_EVERY
 MAX_TURNS = config.MAX_TURNS
 
+# Trần chờ mỗi lượt gọi LLM: đủ cho trả lời dài nhưng nếu Groq lỗi mạng/quota
+# thì bỏ cuộc NHANH (không đứng im cả mấy phút) → trả lỗi sớm rõ ràng.
+_CALL_BUDGET = 60
+
+
+def _budget(deadline):
+    return min(_CALL_BUDGET, max(15, int(deadline - time.time())))
+
 
 def _sys(manager, sid, cwd):
     tools = "\n".join(
@@ -39,13 +47,29 @@ def _sys(manager, sid, cwd):
             "  Chỉ dừng khi đã cạn kiệt phương án khả thi — khi đó báo rõ lỗi cuối cùng + đề xuất bước kế.\n"
             "- Nếu chủ nhân nói 'KHÔNG'/'đừng'/'cấm' việc gì cụ thể: không làm việc đó.\n"
             "- Khi nhận lệnh mới, ưu tiên làm theo lệnh mới nhất của chủ nhân.\n"
+            "- TỐI ĐA HOÁ TỐC ĐỘ: chạy ĐÚNG số tool TỐI THIỂU cần thiết. Gom nhiều lệnh vào 1 bash.\n"
+            "  Đủ thông tin trả lời là DỪNG tool NGAY và trả lời. CẤM tự ý làm thêm việc KHÔNG có trong yêu cầu\n"
+            "  (không ping, không quét mạng, không cài thêm, không kiểm tra bổ sung).\n"
+            "  CẤM hỏi 'muốn làm tiếp không' hay đề xuất công việc khác khi người dùng chưa yêu cầu."
             "- KHÔNG xin phép cho các thao tác kỹ thuật hợp lý (đọc/ghi file, chạy lệnh, cài package, sửa code)\n"
             "  — tự làm và báo kết quả sau. KHÔNG dừng giữa chừng chờ người gõ 'tiếp tục'.\n"
             "- Khi gặp lệnh/package thiếu: tự cài ngay bằng ensure_tool hoặc pip_install, KHÔNG hỏi.\n"
             "- KHÔNG đọc lại một file đã đọc xong khi dữ liệu vẫn còn trong context.\n"
             "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG.\n"
             "- Kết quả tool đầy đủ đã nằm trong history — tiếp tục từ đó, không làm lại từ đầu.\n"
-            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu kết quả. KHÔNG giải thích quy trình. Không dùng emoji."
+            "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu kết quả. KHÔNG giải thích quy trình. Không dùng emoji.\n\n"
+"CÁCH TRẢ LỜI (kiểu opencode):\n"
+            "- Nếu cần suy luận/lập luận nhiều bước, tóm gọn phần lý luận vào cặp thẻ, mỗi thẻ 1 dòng riêng:\n"
+            "  thinking\n"
+            "  <lập luận NGẮN, tối đa 3-4 dòng, xong là đóng thẻ ngay>\n"
+            "  response\n"
+            "  CHỈ suy luận khi THẬT cần. CẤM độc thoại, CẤM tự lập kế hoạch/nói chuyện với chính mình,\n"
+            "  CẤM nhắc về luật lệ hay quá trình ra quyết định. Cứ vào thẳng thẻ response.\n"
+            "- Phần NGOÀI thẻ là CÂU TRẢ LỜI SẠCH (khối thinking chỉ hiển thị MỜ để đọc kèm):\n"
+            "  viết markdown rõ ràng — ##/### cho tiêu đề, **bold** cho điểm nhấn, `code` cho tên lệnh/đường dẫn,\n"
+            "  ``` cho khối lệnh, '- ' cho danh sách, '|' cho bảng so sánh.\n"
+            "- Phần ngoài thẻ KHÔNG lặp lại lập luận: NGẮN GỌN, đúng trọng tâm, kết luận/đường dẫn kết quả rõ ràng.\n"
+            "- Câu hỏi đơn giản thì KHÔNG cần thẻ thinking — trả lời thẳng văn bản markdown sạch."
         ),
     }
 
@@ -110,14 +134,14 @@ class Agent:
                     "ở các bước trước. Xem lịch sử phía trên để biết tiến độ, rồi dùng tool "
                     "để làm nốt và KẾT THÚC khi xong."
                 )}, *msgs]
-                msgs = sessions.compact(self.sid, msgs, llm_budget=max(15, int(deadline - time.time())))
+                msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline))
                 msgs = sessions.trim(msgs)
             for step in range(MAX_STEPS):
                 stopped = self._check_stop(deadline)
                 if stopped:
                     return stopped
                 self._emit({"type": "thinking", "step": step + 1, "turn": turn})
-                msgs = sessions.compact(self.sid, msgs, llm_budget=max(15, int(deadline - time.time())))
+                msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline))
                 msgs = sessions.trim(msgs)
                 self._emit({"type": "llm", "step": step + 1, "turn": turn})
                 reply = None
@@ -126,8 +150,11 @@ class Agent:
                     stopped = self._check_stop(deadline)
                     if stopped:
                         return stopped
-                    reply = groq.chat(msgs, tools=self.manager.schemas() or None,
-                                      budget=max(15, int(deadline - time.time())))
+                    reply = groq.chat_stream(
+                        msgs, tools=self.manager.schemas() or None,
+                        budget=_budget(deadline),
+                        on_delta=lambda ev: self._emit({"type": "stream_delta", "kind": ev["type"], "text": ev.get("text", "")}),
+                    )
                     if reply:
                         break
                     self._emit({"type": "retry"})

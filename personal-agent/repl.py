@@ -1,8 +1,9 @@
-import subprocess, os, sys, time, threading, queue
+import subprocess, os, sys, time, threading, queue, re
 
 import config
 import sessions
 import updater
+import render
 from agentloop import Agent
 from extensions import Manager
 from permissions import PermPolicy, Presets
@@ -13,7 +14,8 @@ C = {
     "cy": "\033[96m", "gr": "\033[92m", "ye": "\033[93m",
     "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
     "lm": "\033[92m",  # xanh lá chuối (lime) — dòng người dùng User>
-    "ob": "\033[34m",  # xanh biển đậm — dòng agent Rem>
+    "ob": "\033[34m",  # xanh biển đậm — tiền tố Rem>
+    "wh": "\033[37m",  # trắng — nội dung trả lời của agent
     "clear": "\033[2J", "home": "\033[H",
 }
 # Prefix phân biệt rõ người dùng vs agent
@@ -38,28 +40,41 @@ def _p(s, col="cy", end="\n"):
     print(C.get(col, "") + str(s) + C["reset"], end=end, flush=True)
 
 
-def _type(s, col="gr"):
-    # In theo từ (word) thay vì từng ký tự để KHÔNG làm vỡ chữ tiếng Việt nhiều byte
+def _strip_ansi(s):
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+def _type(s, col=None):
+    """In theo nhóm chữ NHANH và RÕ: mã màu (ANSI) xuất tức thì không bao giờ bị tách,
+    chữ Vietnamese giữ nguyên nhiều byte. Có sẵn màu từ render → col=None."""
     if not sys.stdin.isatty() or config.DEBUG:
-        _p(s, col)
+        _p(_strip_ansi(s), col if col is not None else "")
         return
+    text = s if col is None else (C.get(col, "") + s + C["reset"])
+    fast = render.disp_len(text) > 1000
+    sa = 0.0 if fast else T * 1.0    # pause sau khoảng trắng
+    sw = 0.0 if fast else T * 0.45   # pause sau từ
+    sys.stdout.write("\033[?25l")
     try:
-        import re as _re
-        color_code = C.get(col, "")
-        parts = _re.split(r"(\s+)", s)
-        sys.stdout.write(color_code)
-        for part in parts:
-            if not part:
-                continue
-            # in cả nhóm ký tự liền mạch 1 lần (bảo toàn Unicode)
-            print(part, end="", flush=True)
-            sys.stdout.write("\033[?25l")
-            time.sleep(T if part.startswith((" ", "\n")) else T * 0.5)
+        for tok in render._tokens(text):
+            if tok[0] == "esc":
+                sys.stdout.write(tok[1])
+            elif tok[0] == "s":
+                sys.stdout.write(tok[1])
+                if sa:
+                    sys.stdout.flush()
+                    time.sleep(sa)
+            else:
+                sys.stdout.write((tok[1] or "") + tok[2])
+                if sw:
+                    sys.stdout.flush()
+                    time.sleep(sw)
     except Exception:
-        _p(s, col)
+        sys.stdout.write(_strip_ansi(text))
     finally:
-        print("\033[?25h" + C["reset"])
-    print()
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+    print(flush=True)
 
 
 def _klines(logo, colors):
@@ -121,6 +136,9 @@ class Repl:
         self._spin_on = False
         self._tool_rows = []      # các dòng tool đã xong (giống timeline opencode)
         self._cur_title = ""
+        self._live_n = 0          # số ký tự model đang soạn (stream) — hiện tiến độ
+        self._live_kind = ""      # "content" | "thinking"
+        self._last_think = ""     # khối suy luận gần nhất (để /think xem đầy đủ)
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -142,11 +160,20 @@ class Repl:
         elif t == "tool_done":
             r = (ev.get("result") or "")
             ok = not r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]"))
-            self._tool_rows.append(((("✓ " if ok else "✗ ") + self._cur_title), not ok))
+            row = ("✓ " if ok else "✗ ") + self._cur_title
+            self._tool_rows.append((row, not ok))
             if len(self._tool_rows) > 14:      # giữ tối đa, không spam màn hình
                 self._tool_rows.pop(0)
+            # In NGAY (timeline LIVE như opencode) — người dùng thấy tiến độ liên tục,
+            # không phải đợi hết lượt mới hiện một loạt dòng.
+            _p("\r  " + row, "rd" if not ok else "dim")
         elif t in ("thinking", "llm"):
-            self._set_status("đang suy nghĩ")
+            self._set_status("đang suy luận")
+        elif t == "stream_delta":
+            self._live_kind = ev.get("kind", "content")
+            self._live_n += len(ev.get("text", ""))
+            if self._live_kind == "thinking":
+                self._status_msg = "đang suy luận"
         elif t == "retry":
             self._set_status("mạng bận, đang thử lại")
         elif t == "turn":
@@ -167,6 +194,8 @@ class Repl:
             el = int(time.time() - self._spin_start)
             wait = time.time() - self._status_since
             base = f"  {self._status_msg}" if self._status_msg else ""
+            if self._live_n > 0:
+                base += f" · {self._live_n} ký tự"
             if el >= 60:
                 base += f"  [{el // 60}p{el % 60:02d}s]"
             else:
@@ -221,6 +250,8 @@ class Repl:
                 self._set_status("đang bắt đầu")
                 self._tool_rows = []
                 self._cur_title = ""
+                self._live_n = 0
+                self._live_kind = ""
                 spin = threading.Thread(target=self._spinner, daemon=True)
                 spin.start()
                 try:
@@ -231,16 +262,21 @@ class Repl:
                 self._busy = False
                 spin.join(timeout=1)      # đợi spinner bỏ dòng cuối xong
                 self._clear_spin_line()   # rồi mới in tránh bị đè "Rem>"
-                # timeline tool đã xong (giống opencode: "✓ Bash — $ cmd")
-                for row, is_err in self._tool_rows:
-                    _p("  " + row, "rd" if is_err else "dim")
+                # timeline tool ĐÃ in live khi từng tool xong ở _on_ev — không in lại nữa
                 if out:
-                    # Tiền tố Rem> màu xanh biển + nội dung trả lời của AGENT
+                    # Render kiểu opencode: suy luận CUỘN GỌN 1 dòng mờ + nội dung markdown
+                    # rõ nét, chỉ tiền tố Rem> màu xanh biển, chữ vẫn trắng.
                     sys.stdout.write(P_AGENT)
                     sys.stdout.flush()
-                    _type(out, "ob")
-                    # Đánh dấu rõ: AI ĐÃ TRẢ LỜI XONG → hiện ngay "Rem>" để người dùng biết
-                    print(C["ob"] + "Rem>" + C["reset"] + C["dim"] + "  (đã trả lời xong)" + C["reset"], flush=True)
+                    think, body = render.split_thinking(out)
+                    self._last_think = think
+                    if think.strip():
+                        # combine thinking + body ONCE: show collapsed thinking header
+                        _type(render.thinking_to_ansi(think, full=False), None)
+                    _type(render.md_to_ansi(body), None)
+                    # Trả lời xong → giữ con trỏ NGAY tại "Rem> " (không xuống dòng) để gõ tiếp
+                    sys.stdout.write(C["ob"] + "Rem>" + C["reset"] + " ")
+                    sys.stdout.flush()
                 self._pending = 0
 
     # ── câu hỏi quyền (safe mode): chạy trong worker, hỏi trực tiếp ──
@@ -316,6 +352,7 @@ class Repl:
                     "/stop    dừng agent đang xử lý (giữ session)",
                     "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
                     "/debug   bật/tắt chế độ gỡ lỗi",
+                    "/think   xem đầy đủ suy luận của lần trả lời cuối",
                     "/clear   xoá màn hình (hiện logo REM)",
                     "/checkupdate  kiểm tra bản mới trên GitHub",
                     "/update  tự cập nhật bản mới nhất (git/tarball)",
@@ -352,6 +389,11 @@ class Repl:
         elif cmd == "/debug":
             config.DEBUG = not config.DEBUG
             _p(f"Chế độ gỡ lỗi: {'BẬT' if config.DEBUG else 'TẮT'}", "gr")
+        elif cmd == "/think":
+            if self._last_think.strip():
+                _type(render.thinking_to_ansi(self._last_think, full=True), None)
+            else:
+                _p("(chưa có suy luận nào để xem — câu trả lời không dùng thẻ thinking)", "dim")
         elif cmd == "/del":
             if len(parts) < 2:
                 _p("Cú pháp: /del <session-id>  (xem /sessions)", "dim")
