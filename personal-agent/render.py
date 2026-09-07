@@ -175,6 +175,27 @@ def _table(rows, tw):
     return out
 
 
+def _strip_orphan_tags(body):
+    """Dọn tag XML / dòng lệnh đánh dấu mà model còn để sót trong câu trả lời
+    (vd trả lời thẳng mà sót 'response', hay bọc <response>...</response>)."""
+    if not body:
+        return ""
+    # bỏ dòng 'response' mồ côi ngay đầu (đóng thẻ của thinking nhưng không mở)
+    lines = body.split("\n")
+    while lines and re.match(r"^\s*(response|answer)\s*$", lines[0], re.I):
+        lines.pop(0)
+    body = "\n".join(lines).strip()
+    # wrapper XML <response>...</response> dính một dòng
+    m = re.match(r"^\s*<(response|answer)>\s*(.*?)\s*</\1>\s*$", body, re.I | re.S)
+    if m:
+        body = m.group(2).strip()
+    # tag lẻ còn sót (mở/đóng, không dính nội dung)
+    body = re.sub(r"<(/?)(thinking|response|answer|recall|output|reply|result)\s*>", "", body, flags=re.I)
+    # tiền tố 'response '/ 'answer ' sót ngay đầu câu trả lời
+    body = re.sub(r"^\s*(response|answer)\s+", "", body, flags=re.I)
+    return body.strip()
+
+
 def split_thinking(text):
     """Tách phần  thinking ... response ra khỏi câu trả lời sạch.
     Robust: thẻ mở phải đúng dòng; thẻ đóng chấp nhận cả dạng dính liền
@@ -189,7 +210,7 @@ def split_thinking(text):
             s = i
             break
     if s is None:
-        return "", text.strip()
+        return "", _strip_orphan_tags(text)
     e = None
     for i in range(s + 1, len(lines)):
         tt = lines[i].strip().lower()
@@ -205,7 +226,7 @@ def split_thinking(text):
         rest = re.sub(r"^\s*response\s*", "", lines[e], flags=re.I)
         after = (rest + "\n" if rest.strip() else "") + "\n".join(lines[e + 1:])
     body = "\n".join(x for x in (before.strip(), after.strip()) if x)
-    return think.strip(), body or ""
+    return think.strip(), _strip_orphan_tags(body)
 
 
 def md_to_ansi(text, tw=None):
