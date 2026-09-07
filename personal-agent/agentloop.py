@@ -1,4 +1,4 @@
-import json, time, threading
+import json, os, time, threading
 
 import config
 import sessions
@@ -11,10 +11,43 @@ MAX_TURNS = config.MAX_TURNS
 # Trần chờ mỗi lượt gọi LLM: đủ cho trả lời dài nhưng nếu Groq lỗi mạng/quota
 # thì bỏ cuộc NHANH (không đứng im cả mấy phút) → trả lỗi sớm rõ ràng.
 _CALL_BUDGET = 60
+# Tổng thời gian một BƯỚC (1 lượt LLM + retry) — nếu quota cạn thì không để retry
+# nuốt hết cả MAX_TASK_SECONDS. Rate-limit dồn → bỏ sớm để báo lỗi rõ, không vờn mãi.
+_STEP_BUDGET = 75
 
 
-def _budget(deadline):
+def _budget(deadline, step_deadline=None):
+    if step_deadline:
+        return min(_STEP_BUDGET, max(15, int(step_deadline - time.time())))
     return min(_CALL_BUDGET, max(15, int(deadline - time.time())))
+
+
+def _load_agents_md(cwd):
+    """Scan thư mục project cho AGENTS.md/CLAUDE.md — inject vào system prompt."""
+    instructions = []
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        for base in (cwd, os.path.expanduser("~")):
+            fp = os.path.join(base, name)
+            if os.path.isfile(fp):
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read(4000).strip()
+                    if content:
+                        instructions.append(f"[{name} từ {base}]\n{content}")
+                except Exception:
+                    pass
+    # conda: kiểm tra thư mục .opencode và .config/opencode
+    for subdir in (".opencode", os.path.join(".config", "opencode")):
+        fp = os.path.join(cwd, subdir, "AGENTS.md")
+        if os.path.isfile(fp):
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(4000).strip()
+                if content:
+                    instructions.append(f"[{subdir}/AGENTS.md]\n{content}")
+            except Exception:
+                pass
+    return "\n\n".join(instructions)
 
 
 def _sys(manager, sid, cwd):
@@ -22,6 +55,8 @@ def _sys(manager, sid, cwd):
         f"- {t['function']['name']}: {t['function']['description']}"
         for t in manager.schemas()
     )
+    agents_md = _load_agents_md(cwd)
+    agents_section = f"\n\nHƯỚNG DẪN DỰ ÁN (từ AGENTS.md):\n{agents_md}" if agents_md else ""
     return {
         "role": "system",
         "content": (
@@ -58,7 +93,7 @@ def _sys(manager, sid, cwd):
             "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG.\n"
             "- Kết quả tool đầy đủ đã nằm trong history — tiếp tục từ đó, không làm lại từ đầu.\n"
             "- Khi xong: trả lời tiếng Việt, ngắn gọn, nêu kết quả. KHÔNG giải thích quy trình. Không dùng emoji.\n\n"
-"CÁCH TRẢ LỜI (kiểu opencode):\n"
+            "CÁCH TRẢ LỜI (kiểu opencode):\n"
             "- Nếu cần suy luận/lập luận nhiều bước, tóm gọn phần lý luận vào cặp thẻ, mỗi thẻ 1 dòng riêng:\n"
             "  thinking\n"
             "  <lập luận NGẮN, tối đa 3-4 dòng, xong là đóng thẻ ngay>\n"
@@ -69,7 +104,11 @@ def _sys(manager, sid, cwd):
             "  viết markdown rõ ràng — ##/### cho tiêu đề, **bold** cho điểm nhấn, `code` cho tên lệnh/đường dẫn,\n"
             "  ``` cho khối lệnh, '- ' cho danh sách, '|' cho bảng so sánh.\n"
             "- Phần ngoài thẻ KHÔNG lặp lại lập luận: NGẮN GỌN, đúng trọng tâm, kết luận/đường dẫn kết quả rõ ràng.\n"
-            "- Câu hỏi đơn giản thì KHÔNG cần thẻ thinking — trả lời thẳng văn bản markdown sạch."
+            "- Câu hỏi đơn giản thì KHÔNG cần thẻ thinking — trả lời thẳng văn bản markdown sạch.\n\n"
+            f"SỬ DỤNG TODO: Khi bắt đầu task nhiều bước, dùng todo_write(session_id='{sid}', todos=[...]) "
+            "để theo dõi tiến độ. Dùng todo_list(session_id='{sid}') để kiểm tra. "
+            "Mỗi todo: {{content: '...', status: 'pending'|'in_progress'|'completed'|'cancelled', priority: 'high'|'medium'|'low'}}."
+            f"{agents_section}"
         ),
     }
 
@@ -145,14 +184,17 @@ class Agent:
                 msgs = sessions.trim(msgs)
                 self._emit({"type": "llm", "step": step + 1, "turn": turn})
                 reply = None
-                # retry nhiều lần với backoff khi Groq không phản hồi (rate-limit/quota)
+                # retry với backoff khi Groq không phản hồi (rate-limit/quota).
+                # step_deadline giới hạn TỔNG thời gian cả bước (≤75s) — nếu quota cạn
+                # thì bỏ cuộc sớm thay vì để các retry nuốt hết MAX_TASK_SECONDS.
+                step_deadline = time.time() + _STEP_BUDGET
                 for _ in range(5):
                     stopped = self._check_stop(deadline)
                     if stopped:
                         return stopped
                     reply = groq.chat_stream(
                         msgs, tools=self.manager.schemas() or None,
-                        budget=_budget(deadline),
+                        budget=_budget(deadline, step_deadline),
                         on_delta=lambda ev: self._emit({"type": "stream_delta", "kind": ev["type"], "text": ev.get("text", "")}),
                     )
                     if reply:

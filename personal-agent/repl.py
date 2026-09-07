@@ -28,10 +28,11 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # Nhãn tool theo phong cách opencode (InlineTool/ToolStatusTitle)
 _TOOL_LABEL = {
     "read_file": "Read", "write_file": "Write", "edit_file": "Edit",
-    "bash": "Bash", "list_dir": "List", "glob_files": "Glob",
-    "grep": "Grep", "web_search": "WebSearch", "web_fetch": "WebFetch",
-    "remember": "Remember", "recall": "Recall", "ensure_tool": "Setup",
-    "pip_install": "PyPI", "github_api": "GitHub", "task": "Task",
+    "apply_patch": "Patch", "bash": "Bash", "list_dir": "List",
+    "glob_files": "Glob", "grep": "Grep", "web_search": "WebSearch",
+    "web_fetch": "WebFetch", "remember": "Remember", "recall": "Recall",
+    "ensure_tool": "Setup", "pip_install": "PyPI", "github_api": "GitHub",
+    "todo_list": "Todo", "todo_write": "Todo", "task": "Task",
     "log": "Log", "kill": "Kill",
 }
 
@@ -110,11 +111,16 @@ def _tool_title(ev):
     note = ""
     args = ev.get("args") or {}
     if isinstance(args, dict):
-        for k in ("command", "path", "query", "url", "pattern", "filename", "name", "file", "dir"):
-            v = args.get(k)
-            if v not in (None, ""):
-                note = str(v)
-                break
+        if name == "apply_patch":
+            note = "(patch)"
+        elif name in ("todo_write", "todo_list"):
+            note = args.get("session_id", "")
+        else:
+            for k in ("command", "path", "query", "url", "pattern", "filename", "name", "file", "dir"):
+                v = args.get(k)
+                if v not in (None, ""):
+                    note = str(v)
+                    break
     label = _TOOL_LABEL.get(name, name)
     if name == "bash" and note:
         note = "$ " + note

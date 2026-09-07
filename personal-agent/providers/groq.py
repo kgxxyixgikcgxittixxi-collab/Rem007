@@ -342,6 +342,32 @@ def chat(msgs, tools=None, budget=None):
     return None
 
 
+def _parse_xml_tools(content):
+    """Fallback: một số model (qwen3.8-27b) đôi khi trả tool_call dạng XML
+    <function_calls><invoke name=".."><parameter name="..">..</parameter></invoke></function_calls>
+    thay vì JSON tool_calls chuẩn của OpenAI. Parse XML → danh sách tool_calls."""
+    if not content or "<function_calls>" not in content:
+        return []
+    calls = []
+    m = re.search(r"<function_calls>(.*?)</function_calls>", content, re.S)
+    if not m:
+        return []
+    for inv in re.finditer(r'<invoke\s+name="([^"]+)">(.*?)</invoke>', m.group(1), re.S):
+        name, body = inv.group(1), inv.group(2)
+        params = {}
+        for p in re.finditer(r'<parameter\s+name="([^"]+)">(.*?)</parameter>', body, re.S):
+            k, v = p.group(1), p.group(2)
+            v = v.strip()
+            try:
+                params[k] = json.loads(v)
+            except Exception:
+                params[k] = v
+        if name and params:
+            calls.append({"id": f"fc-{len(calls)}", "type": "function",
+                          "function": {"name": name, "arguments": json.dumps(params, ensure_ascii=False)}})
+    return calls
+
+
 def _iter_stream(r, on_delta):
     """Tiêu thụ response stream Groq → message cuối. on_delta(ev) nhận
     {"type":"content"|"thinking","text":...} để UI hiện tiến độ chữ trực tiếp."""
@@ -404,9 +430,19 @@ def _iter_stream(r, on_delta):
         msg["content"] = acc["content"]
     if acc["thinking"]:
         msg["reasoning_content"] = acc["thinking"]
+    if not tc:
+        # fallback: parse XML <function_calls> từ CẢ content lẫn thinking
+        # (một số model qwen để XML tool call trong reasoning_content)
+        tc = _parse_xml_tools(acc["content"]) or _parse_xml_tools(acc["thinking"])
+        if tc:
+            body = re.sub(r"<function_calls>.*?</function_calls>", "", acc["content"], flags=re.S).strip()
+            if body:
+                msg["content"] = body
+            else:
+                msg.pop("content", None)
     if tc:
         msg["tool_calls"] = tc
-    if acc["content"] or acc["thinking"] or tc:
+    if msg.get("content") or msg.get("reasoning_content") or tc:
         return msg
     return None
 
@@ -427,7 +463,7 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None):
         for m in chain[:4]:
             if time.time() >= end:
                 break
-            r = _post(body, m, budget=max(1, end - time.time()), timeout=45)
+            r = _post(body, m, budget=max(1, end - time.time()), timeout=30)
             if r == "RATE":
                 continue
             if r is None:

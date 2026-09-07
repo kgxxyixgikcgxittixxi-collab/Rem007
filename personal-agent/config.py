@@ -8,11 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-<<<<<<< HEAD
-VERSION = "3.20"
-=======
-VERSION = "3.22"
->>>>>>> 1e544d3 (v3.22: chong tran context - trim sessions + compact + render ANSI opencode-style + stream LLM + watchdog 60s)
+VERSION = "3.23"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -53,7 +49,8 @@ CHECKPOINT_EVERY = 8    # lưu checkpoint ra file mỗi N bước
 SHELL_TIMEOUT = 60
 MAX_TOOL_OUT = 3000    # kết quả tool bị cắt ở mức này trước khi vào history
 MAX_TRACE = 2000
-MAX_TASK_SECONDS = 180   # tổng thời gian tối đa 1 câu hỏi → quá thì tự dừng (chống treo)
+MAX_TASK_SECONDS = 300   # tổng thời gian tối đa 1 câu hỏi → quá thì tự dừng (chống treo)
+                         # 300s đủ cho dự án lớn nhiều tool; stream + watchdog vẫn chống treo
 TOOL_TIMEOUT_FAST = 90   # timeout MCP cho tool thường (bash/đọc/ghi/web...)
 TOOL_TIMEOUT_PKG = 600   # timeout cho pip_install/ensure_tool (cài đặt lâu)
 TOOL_SLOW_WARN = 40      # sau N giây 1 bước chưa xong → spinner chuyển đỏ cảnh báo treo
