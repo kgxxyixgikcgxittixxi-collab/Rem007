@@ -36,11 +36,21 @@ if [ -z "$PY" ] || ! command -v "$PY" >/dev/null 2>&1; then
 fi
 echo "[i] Python: $PY ($("$PY" --version 2>&1))"
 
-# ── 2. Cài dependencies (requests + python-docx để tạo PPTX) ─────────────
+# ── 2. Cài dependencies (requests + LSP) ─────────────────────────────────
 echo "[i] Cài thư viện Python..."
 # PEP 668/externally-managed → thử user install, fallback thành công là được
 if ! "$PY" -m pip install --quiet requests 2>/dev/null; then
     "$PY" -m pip install --user --quiet requests 2>/dev/null || true
+fi
+
+# ── 2b. LSP (tùy chọn nhưng khuyến khích): pylsp cho Python, clangd cho C/C++ ──
+echo "[i] Cài LSP: python-lsp-server (Python)..."
+if ! "$PY" -m pip install --quiet python-lsp-server 2>/dev/null; then
+    "$PY" -m pip install --user --quiet python-lsp-server 2>/dev/null || true
+fi
+if command -v pkg >/dev/null 2>&1; then
+    echo "[i] Cài clangd cho C/C++ (Termux)..."
+    pkg install -y clang 2>/dev/null || true   # clang cung cấp clangd
 fi
 
 # ── 3. Thiết lập keys.sqlite + thư mục ──────────────────────────────────

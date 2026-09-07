@@ -362,6 +362,7 @@ class Repl:
                     "/clear   xoá màn hình (hiện logo REM)",
                     "/checkupdate  kiểm tra bản mới trên GitHub",
                     "/update  tự cập nhật bản mới nhất (git/tarball)",
+                    "/lsp <file>  kiểm tra lỗi file nguồn (clangd/pylsp)",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
                     "/exit    thoát",
@@ -428,6 +429,25 @@ class Repl:
             self._agent.perm = Presets.build()
             self.presets = "build"
             _p("Đã quay lại preset BUILD.", "gr")
+        elif cmd == "/lsp" or cmd.startswith("/lsp "):
+            if self._busy:
+                _p("Agent đang bận — đợi hết lượt chạy rồi gõ lại.", "ye")
+                return True
+            if len(parts) < 2:
+                _p("Cú pháp: /lsp <file>   — kiểm tra lỗi file (c/cpp/python).", "dim")
+                return True
+            fpath = os.path.expanduser(parts[1])
+            if not os.path.isfile(fpath):
+                _p(f"Không thấy file: {fpath}", "rd")
+                return True
+            try:
+                from mcp_servers.lsp_server import lsp_diagnostics
+                self._clear_spin_line()
+                _p(f"LSP check: {fpath}", "cy")
+                out = lsp_diagnostics(fpath)
+            except Exception as e:
+                out = f"[LOI] {type(e).__name__}: {e}"
+            _p(out, "gr" if "(không có lỗi)" in out else "ye")
         elif cmd == "/keys":
             self._keys()
         elif cmd == "/checkupdate":

@@ -108,6 +108,9 @@ def _sys(manager, sid, cwd):
             f"SỬ DỤNG TODO: Khi bắt đầu task nhiều bước, dùng todo_write(session_id='{sid}', todos=[...]) "
             "để theo dõi tiến độ. Dùng todo_list(session_id='{sid}') để kiểm tra. "
             "Mỗi todo: {{content: '...', status: 'pending'|'in_progress'|'completed'|'cancelled', priority: 'high'|'medium'|'low'}}."
+            "\nSỬ DỤNG LSP: Sau khi mở hoặc sửa file nguồn (.c/.cpp/.py), dùng lsp_diagnostics(file) "
+            "để lấy lỗi/cảnh báo, lsp_definition/lsp_references/lsp_symbols/lsp_hover để phân tích mã. "
+            "Trước khi chạy/biên dịch, luôn lsp_diagnostics để tự sửa lỗi tĩnh."
             f"{agents_section}"
         ),
     }

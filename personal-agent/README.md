@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.5: Giao diện mới kiểu opencode — logo **REM** ASCII to nhiều màu + banner khởi động, lệnh `/clear`, install tự động cho người dùng mới. Bảo mật auto-install tool (PyPI verify + rollback + audit log) từ v3.4.
+> v3.24: Thêm **LSP** (extension `mcp_servers/lsp_server`): `lsp_diagnostics/lsp_definition/lsp_references/lsp_symbols/lsp_hover/lsp_supported` qua clangd (C/C++) + pylsp/ast (Python), tự cài trong `install.sh`. Lệnh `/lsp <file>`. Trước đó v3.23: hiển thị live kiểu opencode (stream LLM + spinner + watchdog), TODO theo session, apply_patch, permission wildcard, tự cập nhật (`/update`).
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
@@ -15,9 +15,10 @@ agentloop.py ── Agent loop: LLM → tool_calls → execute → lặp
    │
 extensions.py ── ExtensionManager: khám phá & gọi tool, tự restart khi mất kết nối
    │
-   ├── mcp_servers/developer  (11 tool)  bash, read/write/edit file, grep, glob, cwd, ensure_tool, pip_install...
+   ├── mcp_servers/developer  (14 tool)  bash, read/write/edit file, grep, glob, cwd, ensure_tool, pip_install, todo_list/todo_write, apply_patch...
    ├── mcp_servers/webtool    (3 tool)  web_search, web_fetch, github_api
-   └── mcp_servers/memory     (2 tool)  remember, recall (graph.json)
+   ├── mcp_servers/memory     (2 tool)  remember, recall (graph.json)
+   └── mcp_servers/lsp        (6 tool)  lsp_diagnostics, lsp_definition, lsp_references, lsp_symbols, lsp_hover, lsp_supported (clangd/pylsp)
 mcplib.py  ── Client/Server MCP over stdio (chuẩn MCP, chỉ dùng stdlib, không cần Rust)
 providers/groq.py ── Groq API + xoay vòng nhiều key + tự chọn model tồn tại + native tool_calls
 ```
@@ -60,7 +61,9 @@ Key lưu trong `~/.rem_ai/rem.db`.
 /build       quay lại preset thường (hỏi xác nhận khi cần)
 /auto /safe  bật/tắt chế độ tự động xác nhận
 /debug       bật/tắt chế độ gỡ lỗi (hiện đầy đủ, không gõ chữ)
+/lsp <file>  kiểm tra lỗi file nguồn nhanh (clangd/pylsp)
 /clear       xoá màn hình (hiện lại logo REM)
+/checkupdate /update  kiểm tra + tự cập nhật bản mới từ GitHub
 /key /keys  quản lý Groq keys
 	exit      thoát
 ```

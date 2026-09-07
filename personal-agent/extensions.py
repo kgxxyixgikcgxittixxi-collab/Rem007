@@ -8,6 +8,7 @@ SPECS = [
     {"name": "developer", "module": "developer", "desc": "file + shell + thư mục"},
     {"name": "webtool", "module": "webtool", "desc": "tìm web, đọc web, GitHub API"},
     {"name": "memory", "module": "memory_server", "desc": "bộ nhớ dài hạn graph.json"},
+    {"name": "lsp", "module": "lsp_server", "desc": "LSP: clangd/pylsp (diagnostics, định nghĩa, tham chiếu, symbol, hover)"},
 ]
 
 LOGDIR = os.path.join(config.DIR, "logs")

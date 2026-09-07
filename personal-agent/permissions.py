@@ -3,6 +3,8 @@ import os, json, fnmatch
 ALLOW = {
     "read_file", "list_dir", "grep", "glob_files", "cwd", "web_search",
     "recall", "remember", "todo_list", "todo_write",
+    "lsp_supported", "lsp_diagnostics", "lsp_definition", "lsp_references",
+    "lsp_symbols", "lsp_hover",
 }
 ASK = {
     "bash", "write_file", "edit_file", "apply_patch", "chdir",
