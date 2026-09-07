@@ -2,6 +2,7 @@ import subprocess, os, sys, time, threading, queue
 
 import config
 import sessions
+import updater
 from agentloop import Agent
 from extensions import Manager
 from permissions import PermPolicy, Presets
@@ -316,6 +317,8 @@ class Repl:
                     "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
                     "/debug   bật/tắt chế độ gỡ lỗi",
                     "/clear   xoá màn hình (hiện logo REM)",
+                    "/checkupdate  kiểm tra bản mới trên GitHub",
+                    "/update  tự cập nhật bản mới nhất (git/tarball)",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
                     "/exit    thoát",
@@ -379,6 +382,26 @@ class Repl:
             _p("Đã quay lại preset BUILD.", "gr")
         elif cmd == "/keys":
             self._keys()
+        elif cmd == "/checkupdate":
+            rv = updater.remote_version()
+            if not rv:
+                _p("Không lấy được bản mới từ GitHub (kiểm tra mạng).", "rd")
+            elif updater._ver_tuple(rv) > updater._ver_tuple(config.VERSION):
+                _p(f"Có bản mới: v{config.VERSION} → v{rv}. Gõ /update để cập nhật.", "ye")
+            else:
+                _p(f"Đã ở bản mới nhất: v{config.VERSION}.", "gr")
+        elif cmd == "/update":
+            if self._busy:
+                _p("Agent đang bận — đợi hết lượt hiện tại rồi gõ /update.", "ye")
+                return True
+            self._clear_spin_line()
+            ok, newv, lines = updater.update()
+            for ln in lines:
+                _p(ln, "gr" if ok else "rd")
+            if ok:
+                _p("Khởi động lại để dùng bản mới: /exit rồi gõ lại Remtm.", "dim")
+            else:
+                _p("Cập nhật không thành công (xem thông tin trên).", "rd")
         elif cmd.startswith("/key "):
             k = cmd[5:].strip()
             if groq.add_key(k):

@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.19"
+VERSION = "3.20"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -53,3 +53,12 @@ MAX_TASK_SECONDS = 240   # tổng thời gian tối đa 1 câu hỏi → quá th
 TOOL_TIMEOUT_FAST = 90   # timeout MCP cho tool thường (bash/đọc/ghi/web...)
 TOOL_TIMEOUT_PKG = 600   # timeout cho pip_install/ensure_tool (cài đặt lâu)
 TOOL_SLOW_WARN = 40      # sau N giây 1 bước chưa xong → spinner chuyển đỏ cảnh báo treo
+
+# ── repository + tự cập nhật bản mới từ GitHub ────────────────────────────
+GIT_REPO = "kgxxyixgikcgxittixxi-collab/Rem007"
+GIT_BRANCH = "main"
+REMOTE_CONFIG = f"https://raw.githubusercontent.com/{GIT_REPO}/{GIT_BRANCH}/personal-agent/config.py"
+REPO_TARBALL = f"https://github.com/{GIT_REPO}/archive/refs/heads/{GIT_BRANCH}.tar.gz"
+AUTO_UPDATE = os.environ.get("REM_AUTO_UPDATE", "1") == "1"  # REM_AUTO_UPDATE=0 để chỉ báo, không tự update
+UPDATE_CHECK_TIMEOUT = 6    # giây tối đa chờ kiểm tra bản mới
+UPDATE_TIMEOUT = 120        # giây tối đa cho 1 lần cập nhật
