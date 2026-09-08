@@ -265,7 +265,13 @@ _NET_ERRS = ("ReadTimeout", "ConnectTimeout", "ConnectionError", "ReadError",
 
 def _post(body, model, timeout=30, budget=None):
     """Gọi Groq, vòng key round-robin với cooldown rate-limit.
-    budget (giây) giới hạn cứng tổng thời gian — tránh treo lâu không tự thoát."""
+    budget (giây) giới hạn cứng tổng thời gian — tránh treo lâu không tự thoát.
+    GPT-OSS nghĩ dài (reasoning_effort mặc định = medium) → lệnh đơn giản chậm.
+    Đặt 'low' cho trả lời nhanh hơn; override bằng biến REM_REASONING=low|medium|high."""
+    body = dict(body)
+    effort = os.environ.get("REM_REASONING", "low").strip().lower()
+    if model.startswith("openai/gpt-oss") and effort in ("low", "medium", "high"):
+        body["reasoning_effort"] = effort
     ks = keys()
     if not ks:
         return None
