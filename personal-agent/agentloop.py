@@ -111,6 +111,9 @@ def _sys(manager, sid, cwd):
             "\nSỬ DỤNG LSP: Sau khi mở hoặc sửa file nguồn (.c/.cpp/.py), dùng lsp_diagnostics(file) "
             "để lấy lỗi/cảnh báo, lsp_definition/lsp_references/lsp_symbols/lsp_hover để phân tích mã. "
             "Trước khi chạy/biên dịch, luôn lsp_diagnostics để tự sửa lỗi tĩnh."
+            "\nSỬ DỤNG SUBAGENT: Với nhiệm vụ tách biệt nặng (quét toàn repo, viết code độc lập, "
+            "tra cứu song song), dùng task(description) — agent con có đủ tool riêng. "
+            "Mô tả rõ việc + format kết quả cần trả về. Không dùng task cho việc nhỏ gọi trực tiếp được."
             f"{agents_section}"
         ),
     }
@@ -250,7 +253,7 @@ class Agent:
                             budget = max(1, int(deadline - time.time()))
                             if budget <= 0:
                                 return "[ĐÃ DỪNG] hết thời gian chống treo của lượt này."
-                            if name in ("pip_install", "ensure_tool"):
+                            if name in ("pip_install", "ensure_tool", "task"):
                                 to = min(config.TOOL_TIMEOUT_PKG, budget)
                             else:
                                 to = min(config.TOOL_TIMEOUT_FAST, budget)

@@ -128,6 +128,36 @@ def _tool_title(ev):
     return f"{label}  —  {note}" if note else label
 
 
+def _diff_preview(name, args):
+    """Trích ngắn diff để người dùng duyệt trước khi cấp quyền (kiểu opencode)."""
+    if not isinstance(args, dict):
+        return ""
+    if name == "apply_patch":
+        pt = args.get("patch_text") or args.get("patch") or ""
+        if isinstance(pt, str) and pt.strip():
+            n = len(pt.strip().splitlines())
+            lines = "\n".join(f"  {ln[:160]}" for ln in pt.strip().splitlines()[:40])
+            return lines + (f"\n  … ({n} dòng)" if n > 40 else "")
+    if name == "edit_file":
+        old, new = args.get("old", ""), args.get("new", "")
+        p = args.get("path") or args.get("file") or "<file>"
+        if isinstance(old, str) and isinstance(new, str) and (old != new):
+            ol = old.splitlines()
+            nl = new.splitlines()
+            op = "\n".join(f"  - {ln[:160]}" for ln in ol[:10])
+            np_ = "\n".join(f"  + {ln[:160]}" for ln in nl[:10])
+            return f"{p}\n{op}" + (f"\n  … (-{len(ol)-10})" if len(ol) > 10 else "") + \
+                   f"\n{np_}" + (f"\n  … (+{len(nl)-10})" if len(nl) > 10 else "")
+    if name == "write_file":
+        p = args.get("path") or args.get("file") or "<file>"
+        c = args.get("content") or ""
+        if isinstance(c, str) and c.strip():
+            n = len(c.splitlines())
+            lines = "\n".join(f"  + {ln[:160]}" for ln in c.splitlines()[:15])
+            return f"{p} (tạo/ghi)\n{lines}" + (f"\n  … (+{n-15})" if n > 15 else "")
+    return ""
+
+
 class Repl:
     def __init__(self, manager):
         self.manager = manager
@@ -289,8 +319,12 @@ class Repl:
     def _ask(self, name, args):
         self._clear_spin_line()
         _p(f"→ tool '{name}' cần quyền", "ye")
-        mini = str(args)[:120]
-        _p(f"  {mini}", "dim")
+        preview = _diff_preview(name, args)
+        if preview:
+            _p("  " + preview, "dim")
+        else:
+            mini = str(args)[:120]
+            _p(f"  {mini}", "dim")
         try:
             a = input("  Cho phép? [y/N] ").strip().lower()
         except Exception:
@@ -339,6 +373,57 @@ class Repl:
         self._clear_spin_line()
         print(CLEAR_SEQ)
 
+    # ── /init: tạo AGENTS.md cho thư mục/ repo hiện tại (kiểu opencode) ──
+    def _init_agents(self):
+        import subprocess as _sp
+        try:
+            cwd = _sp.check_output(["bash", "-c", "pwd"], text=True, timeout=5).strip()
+        except Exception:
+            cwd = os.getcwd()
+        name = os.path.basename(cwd) or "project"
+        ag = os.path.join(cwd, "AGENTS.md")
+        if os.path.exists(ag):
+            _p(f"AGENTS.md đã tồn tại tại {cwd} — bỏ qua (chỉnh tay nếu cần).", "ye")
+            return
+        langs = []
+        try:
+            out = _sp.check_output(["bash", "-c", "ls -A"], text=True, timeout=5)
+            files = out.split()
+            for f in files:
+                fn = f.lower()
+                if fn.endswith((".py", ".sh", ".md", ".c", ".cpp", ".h", ".js", ".ts", ".json", ".yml", ".yaml", ".html", ".css", ".sql", ".go", ".rs")):
+                    langs.append(os.path.splitext(fn)[1].lstrip("."))
+            langs = sorted(set(langs)) or ["—"]
+        except Exception:
+            pass
+        tmpl = f"""# AGENTS.md — Hướng dẫn cho Rem Agent (và mọi AI agent)
+
+## Dự án
+{name} — ở {cwd}
+Ngôn ngữ/tệp chính: {', '.join(langs)}
+
+## Lệnh hữu ích
+- Chạy ứng dụng:  (bổ sung, vd `python main.py`)
+- Chạy test:      (bổ sung, vd `pytest` / `bash test.sh`)
+- Build:          (bổ sung, vd `make` / `npm run build`)
+
+## Cấu trúc
+(Bổ sung sơ đồ thư mục chính ở đây — `ls -R` nếu cần quét.)
+
+## Quy ước cho agent
+- Đọc trước khi sửa; dùng `edit_file`/`apply_patch` thay vì viết cả file trừ khi tạo mới.
+- Sau khi sửa code .c/.cpp/.py hãy chạy `lsp_diagnostics` để bắt lỗi tĩnh trước khi chạy/build.
+- Kiểm chứng mọi thay đổi bằng cách chạy lệnh test của dự án.
+- (Bổ sung quy ước riêng của nhóm ở đây.)
+"""
+        try:
+            with open(ag, "w", encoding="utf-8") as f:
+                f.write(tmpl)
+            _p(f"Đã tạo {ag}", "gr")
+            _p("Sửa AGENTS.md theo dự án — Rem sẽ tự nạp file này khi làm việc trong thư mục.", "dim")
+        except Exception as e:
+            _p(f"[LOI] không ghi AGENTS.md: {e}", "rd")
+
     def slash(self, line):
         cmd = line.strip()
         parts = cmd.split()
@@ -363,6 +448,8 @@ class Repl:
                     "/checkupdate  kiểm tra bản mới trên GitHub",
                     "/update  tự cập nhật bản mới nhất (git/tarball)",
                     "/lsp <file>  kiểm tra lỗi file nguồn (clangd/pylsp)",
+                    "/mcp     xem / nạp lại MCP server ngoài (~/.rem_ai/mcp.json)",
+                    "/init    tạo AGENTS.md cho thư mục đang làm việc",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
                     "/exit    thoát",
@@ -448,6 +535,22 @@ class Repl:
             except Exception as e:
                 out = f"[LOI] {type(e).__name__}: {e}"
             _p(out, "gr" if "(không có lỗi)" in out else "ye")
+        elif cmd == "/mcp" or cmd.startswith("/mcp "):
+            exts = self.manager.external_list()
+            if not exts:
+                _p("Chưa có MCP server ngoài. Tạo file ~/.rem_ai/mcp.json dạng: "
+                   '{"mcp": {"tên": {"type": "stdio", "command": ["python3", "/abs/server.py"]}}}', "dim")
+                return True
+            if len(parts) > 1 and parts[1] == "reload":
+                _p("Đang nạp lại MCP ngoài...", "dim")
+                self.manager.reload_external()
+                exts = self.manager.external_list()
+            for e in exts:
+                st = "OK" if e.enabled else "LOI"
+                _p(f"  {e.name:16} [{st}] {e.desc} — {len(e.tools)} tool" + (f" | {e.error}" if e.error else ""),
+                   ("gr" if e.enabled else "rd"))
+        elif cmd == "/init":
+            self._init_agents()
         elif cmd == "/keys":
             self._keys()
         elif cmd == "/checkupdate":

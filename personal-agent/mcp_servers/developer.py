@@ -570,6 +570,29 @@ def pip_install(pkg, timeout=600):
     return result
 
 
+# ── subagent (kiểu opencode Task) ────────────────────────────────────────────
+
+def task(description, session_id=""):
+    """Chạy agent con độc lập trong tiến trình này: đủ tool riêng (file/bash/web/LSP),
+    session riêng, tự quản lý permission (mặc định auto). Chạy tối đa MAX_TASK_SECONDS."""
+    from agentloop import Agent
+    from extensions import Manager
+    from permissions import Presets
+    sid = session_id or None
+    try:
+        m = Manager()
+        m.start_all()
+        agent = Agent(m, Presets.build(), sid=sid)
+        try:
+            out = agent.run(description)
+        finally:
+            m.close_all()
+        text = str(out or "(trống)").strip()
+        return text[:MAX_TOOL_OUT] + ("\n[SUBAGENT CẮT GỌN]" if len(text) > MAX_TOOL_OUT else "")
+    except Exception as e:
+        return f"[LOI] subagent: {type(e).__name__}: {e}"
+
+
 # ── tools table ──────────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -623,6 +646,13 @@ TOOLS = [
          "Cài package PyPI an toàn. Đã xác minh tên tồn tại trên PyPI (chống typosquatting). "
          "Snapshot trước khi cài → nếu import fail thì tự rollback. Ghi audit log.",
          schema({"pkg": {"type": "string", "description": "tên package, vd: requests hoặc requests==2.31.0"}}), pip_install),
+    Tool("task",
+         "Chạy một SUBAGENT độc lập (kiểu opencode Task) làm việc nền song song: giao description "
+         "mô tả rõ nhiệm vụ + yêu cầu trả về kết quả cụ thể. Subagent có đầy đủ tool của riêng nó "
+         "(file, bash, web, memory, LSP) và session riêng. Rất hữu ích cho: phân tích/dò tìm trên "
+         "toàn repo, viết code tách biệt, kiểm tra chéo, tóm tắt. Chờ subagent xong rồi nhận kết quả.",
+         schema({"description": {"type": "string", "description": "nhiệm vụ ngắn gọn + format kết quả mong muốn"},
+                 "session_id": {"type": "string", "description": "(tùy chọn) null → tự tạo session mới"}}), task),
 ]
 
 if __name__ == "__main__":

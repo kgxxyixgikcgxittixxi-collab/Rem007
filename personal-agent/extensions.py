@@ -1,4 +1,4 @@
-import os, sys, subprocess
+import os, sys, subprocess, json
 
 import config
 from mcplib import Client
@@ -11,34 +11,89 @@ SPECS = [
     {"name": "lsp", "module": "lsp_server", "desc": "LSP: clangd/pylsp (diagnostics, định nghĩa, tham chiếu, symbol, hover)"},
 ]
 
+# MCP servers NGOÀI do người dùng khai báo (kiểu opencode.json):
+#   ~/.rem_ai/mcp.json   (hoặc biến REM_MCP_FILE)
+#   {"mcp": {"tên": {"type": "stdio", "command": ["python3", "/abs/server.py"], "env": {"K": "V"}}}}
+MCP_FILE = os.environ.get("REM_MCP_FILE", "") or os.path.join(config.DIR, "mcp.json")
+
 LOGDIR = os.path.join(config.DIR, "logs")
 
 
+def _external_specs():
+    """Đọc mcp.json → danh sách specs ngoài (rỗng nếu không có file/dữ liệu)."""
+    try:
+        with open(MCP_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+    mcp = data.get("mcp") if isinstance(data, dict) else None
+    if not isinstance(mcp, dict):
+        return []
+    specs = []
+    for name, cfg in mcp.items():
+        if not isinstance(cfg, dict):
+            continue
+        if cfg.get("type", "stdio") != "stdio":
+            continue
+        cmd = cfg.get("command")
+        if not isinstance(cmd, list) or not cmd or not isinstance(cmd[0], str):
+            continue
+        cmd = [str(c) for c in cmd]
+        specs.append({
+            "name": "mcp:" + str(name),
+            "module": None,
+            "desc": "MCP ngoài: " + " ".join(cmd),
+            "command": cmd,
+            "env": cfg.get("env") if isinstance(cfg.get("env"), dict) else {},
+        })
+    return specs
+
+
 class Extension:
-    def __init__(self, name, module, desc):
+    def __init__(self, name, module, desc, command=None, env=None):
         self.name = name
         self.module = module
         self.desc = desc
+        self.command = command      # MCP ngoài: list lệnh, không dùng module
+        self.env = env or {}
         self.enabled = False
         self.error = ""
         self.client = None
         self.tools = []
         self._logf = None
+        self.external = command is not None
 
     def start(self):
         root = os.path.dirname(os.path.abspath(__file__))
         py = sys.executable
         os.makedirs(LOGDIR, exist_ok=True)
         self._logf = open(os.path.join(LOGDIR, self.name + ".log"), "a", encoding="utf-8")
-        proc = subprocess.Popen(
-            [py, "-m", "mcp_servers." + self.module],
-            cwd=root,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self._logf,
-            text=True,
-            start_new_session=True,
-        )
+        if self.external:
+            cmd = self.command
+            cwd = root
+            env = dict(os.environ)
+            env.update(self.env)
+        else:
+            cmd = [py, "-m", "mcp_servers." + self.module]
+            cwd = root
+            env = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._logf,
+                env=env,
+                text=True,
+                start_new_session=True,
+            )
+        except Exception as e:
+            self.enabled = False
+            self.error = repr(e)
+            return
         self.client = Client(proc)
         try:
             self.client.initialize()
@@ -69,12 +124,28 @@ class Extension:
 
 
 class Manager:
-    def __init__(self, specs=SPECS):
-        self.extensions = [Extension(**s) for s in specs]
+    def __init__(self, specs=None):
+        base = list(specs) if specs is not None else list(SPECS)
+        base = base + _external_specs()
+        self.extensions = [Extension(**s) for s in base]
 
     def start_all(self):
         for e in self.extensions:
             e.start()
+
+    def reload_external(self):
+        """(Re)start các MCP server ngoài theo mcp.json; giữ nguyên extension nội."""
+        for e in self.extensions:
+            if e.external:
+                e.close()
+        self.extensions = [e for e in self.extensions if not e.external]
+        for s in _external_specs():
+            e = Extension(**s)
+            e.start()
+            self.extensions.append(e)
+
+    def external_list(self):
+        return [e for e in self.extensions if e.external]
 
     def tool_map(self):
         m = {}

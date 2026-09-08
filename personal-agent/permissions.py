@@ -8,7 +8,7 @@ ALLOW = {
 }
 ASK = {
     "bash", "write_file", "edit_file", "apply_patch", "chdir",
-    "web_fetch", "github_api", "ensure_tool", "pip_install",
+    "web_fetch", "github_api", "ensure_tool", "pip_install", "task",
 }
 DENY = set()
 

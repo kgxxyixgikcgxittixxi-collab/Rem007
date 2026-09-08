@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.24: Thêm **LSP** (extension `mcp_servers/lsp_server`): `lsp_diagnostics/lsp_definition/lsp_references/lsp_symbols/lsp_hover/lsp_supported` qua clangd (C/C++) + pylsp/ast (Python), tự cài trong `install.sh`. Lệnh `/lsp <file>`. Trước đó v3.23: hiển thị live kiểu opencode (stream LLM + spinner + watchdog), TODO theo session, apply_patch, permission wildcard, tự cập nhật (`/update`).
+> v3.25: **Subagent** (`task` — agent con chạy độc lập kiểu opencode Task, đủ tool riêng + session riêng), **MCP server ngoài** qua `~/.rem_ai/mcp.json` (stdio, có `/mcp` `/mcp reload`), **`/init`** sinh `AGENTS.md`, **diff preview** khi xác nhận quyền (apply_patch/edit/write). Trước đó v3.24: **LSP** (clangd/pylsp: diagnostics/definition/references/symbols/hover) + `/lsp <file>`.
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
@@ -29,6 +29,16 @@ providers/groq.py ── Groq API + xoay vòng nhiều key + tự chọn model t
 - **Tự phục hồi**: MCP server crash → ExtensionManager `close + start` lại extension và gọi lại tool 1 lần.
 - **Permission** giống opencode: preset `build` (tool ghi/bash/web_fetch = "ask"), preset `plan` (cấm ghi/bash/fetch, chỉ đọc). Tool nguy hiểm (`rm -rf /`, `mkfs`, `dd if=`, ...) bị chặn cứng trong MCP server.
 - **Session journal**: JSONL theo từng lượt, có `/sessions` liệt kê + `/new` bắt đầu mới + `/del <id>` xoá session cũ, tự `compact` (tóm tắt) khi hội thoại quá dài.
+
+## Subagent (Task tool)
+Tool `task(description)` chạy một **agent con độc lập** (kiểu opencode Task): tiến trình MCP của riêng nó, session riêng, permission auto, giới hạn chống treo (MAX_TASK_SECONDS). Dùng cho nhiệm vụ tách biệt: quét toàn repo, viết code độc lập, tra cứu song song.
+
+## MCP server ngoài
+Khai báo trong `~/.rem_ai/mcp.json` (hoặc biến `REM_MCP_FILE`):
+```json
+{"mcp": {"tên": {"type": "stdio", "command": ["python3", "/abs/path/server.py"], "env": {"K": "V"}}}}
+```
+Mỗi server ngoài nói MCP chuẩn qua stdio, xuất hiện trong `/status` (tiền tố `mcp:`), xem/nạp lại bằng `/mcp` và `/mcp reload`.
 
 ## Cài đặt
 
@@ -62,6 +72,8 @@ Key lưu trong `~/.rem_ai/rem.db`.
 /auto /safe  bật/tắt chế độ tự động xác nhận
 /debug       bật/tắt chế độ gỡ lỗi (hiện đầy đủ, không gõ chữ)
 /lsp <file>  kiểm tra lỗi file nguồn nhanh (clangd/pylsp)
+/mcp     xem MCP server ngoài;  /mcp reload  nạp lại (~/.rem_ai/mcp.json)
+/init    tạo AGENTS.md cho thư mục đang làm việc
 /clear       xoá màn hình (hiện lại logo REM)
 /checkupdate /update  kiểm tra + tự cập nhật bản mới từ GitHub
 /key /keys  quản lý Groq keys
