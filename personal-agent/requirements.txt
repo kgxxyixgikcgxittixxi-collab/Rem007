@@ -1,4 +1,9 @@
 requests>=2.28
+# Tạo bài thuyết trình PowerPoint (xem examples/presentations/). python-pptx cần lxml.
+# - Debian/Ubuntu/X11: nếu pip báo lỗi build lxml (vd máy ARM không có wheel) thì cài trước:
+#     apt-get install -y python3-lxml     (hoặc:  pkg install -y python-lxml   trên Termux)
+#   rồi chạy lại pip. install.sh đã tự xử lý bước này.
+python-pptx>=1.0
 # LSP cho Python (pylsp) — cho tool lsp_diagnostics/lsp_definition/...  Bỏ comment để cài LSP.
 # python-lsp-server>=1.11
 # cryptography (tuy chon): dung de ma hoa Groq key bang Fernet. Neu khong cai duoc

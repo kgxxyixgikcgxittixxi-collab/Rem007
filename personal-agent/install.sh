@@ -36,11 +36,28 @@ if [ -z "$PY" ] || ! command -v "$PY" >/dev/null 2>&1; then
 fi
 echo "[i] Python: $PY ($("$PY" --version 2>&1))"
 
-# ── 2. Cài dependencies (requests + LSP) ─────────────────────────────────
+# ── 2. Cài dependencies (requests + python-pptx) ─────────────────────────
 echo "[i] Cài thư viện Python..."
-# PEP 668/externally-managed → thử user install, fallback thành công là được
-if ! "$PY" -m pip install --quiet requests 2>/dev/null; then
-    "$PY" -m pip install --user --quiet requests 2>/dev/null || true
+# PEP 668/externally-managed → thử user install / --break-system-packages (Ubuntu 24+)
+_pip() {
+    if "$PY" -m pip install --quiet "$@" 2>/dev/null; then return 0; fi
+    if "$PY" -m pip install --user --quiet "$@" 2>/dev/null; then return 0; fi
+    "$PY" -m pip install --break-system-packages --quiet "$@" 2>/dev/null
+}
+_pip "requests>=2.28"
+
+# ── 2a. python-pptx (bài thuyết trình): lxml là gốc rễ trên ARM/Termux ────
+echo "[i] Cài python-pptx (tạo PowerPoint)..."
+if ! "$PY" -c "import pptx" >/dev/null 2>&1; then
+    if ! "$PY" -c "import lxml" >/dev/null 2>&1 && ! _pip lxml; then
+        echo "[i] lxml không build được bằng pip — cài qua apt/pkg..."
+        if [ -n "$PREFIX" ]; then
+            pkg install -y python-lxml 2>/dev/null || true
+        else
+            apt-get install -y python3-lxml 2>/dev/null || true
+        fi
+    fi
+    _pip "python-pptx>=1.0" || echo "[!] python-pptx chưa cài được — bỏ qua, bài thuyết trình PPTX sẽ không dùng được."
 fi
 
 # ── 2b. LSP (tùy chọn nhưng khuyến khích): pylsp cho Python, clangd cho C/C++ ──
