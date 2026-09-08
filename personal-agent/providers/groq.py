@@ -258,6 +258,9 @@ def fb_models():
 _RR = [0]
 _COOL = {}  # key -> cooldown until ts
 _RATE = (413, 429)
+# Lỗi mạng/read-timeout: KHÔNG retry dồn dập — thoát nhanh cho khỏi treo
+_NET_ERRS = ("ReadTimeout", "ConnectTimeout", "ConnectionError", "ReadError",
+             "RemoteDisconnected", "ChunkedEncodingError", "ProxyError")
 
 
 def _post(body, model, timeout=30, budget=None):
@@ -268,6 +271,7 @@ def _post(body, model, timeout=30, budget=None):
         return None
     n = len(ks)
     last = None
+    net_fail = 0
     end = time.time() + (budget if budget and budget > 0 else 75)
     while time.time() < end:
         now = time.time()
@@ -292,6 +296,7 @@ def _post(body, model, timeout=30, budget=None):
                 json={"model": model, **body}, timeout=to,
             )
             if r.status_code == 200:
+                net_fail = 0
                 return r
             if r.status_code in _RATE:
                 retry = r.headers.get("retry-after")
@@ -304,6 +309,10 @@ def _post(body, model, timeout=30, budget=None):
                     break
         except Exception as e:
             last = type(e).__name__
+            net_fail += 1
+            # mạng/timeout liên tiếp → đừng retry dồn dập, thoát nhanh
+            if last in _NET_ERRS and net_fail >= 2:
+                break
     if last == "RATE":
         return "RATE"
     if last:
@@ -313,13 +322,13 @@ def _post(body, model, timeout=30, budget=None):
 
 def chat(msgs, tools=None, budget=None):
     """Trả về message của model đầu tiên trả lời được trong khung thời gian budget."""
-    body = {"messages": msgs, "max_tokens": 4096}
+    body = {"messages": msgs, "max_tokens": 16384}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
     chain = chat_models() + [m for m in fb_models() if m not in chat_models()]
     end = time.time() + (budget if budget and budget > 0 else 75)
-    for attempt in range(4):
+    for attempt in range(3):
         if time.time() >= end:
             return None
         all_rate = True
@@ -333,9 +342,9 @@ def chat(msgs, tools=None, budget=None):
             if r is not None:
                 return r.json()["choices"][0]["message"]
             all_rate = False
-# hết model nào còn dùng được tạm → backoff rồi thử lại cho tới hết budget
+# hết model nào còn dùng được tạm → backoff ngắn rồi thử lại tới hết budget
         if all_rate:
-            wait = min(3 + attempt * 3, 15)
+            wait = min(2 + attempt * 2, 8)
             time.sleep(max(0.0, min(wait, end - time.time())))
             continue
         return None
@@ -449,21 +458,23 @@ def _iter_stream(r, on_delta):
 
 def chat_stream(msgs, tools=None, budget=None, on_delta=None):
     """Gọi Groq dạng STREAM — UI thấy chữ/tiến độ đang chảy, không bị 'treo im'.
-    Trả message cuối giống chat(), kèm on_delta để cập nhật tiến độ."""
+    Trả message cuối giống chat(), kèm on_delta để cập nhật tiến độ.
+    max_tokens 4096 (~5KB/lần): mỗi phản hồi nhỏ → chạy hết trong timeout, KHÔNG bị cắt
+    giữa stream như các phản hồi cồng kềnh; file lớn model tự ghi thành nhiều phần nhỏ."""
     body = {"messages": msgs, "max_tokens": 4096, "stream": True}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
     chain = chat_models() + [m for m in fb_models() if m not in chat_models()]
     end = time.time() + (budget if budget and budget > 0 else 75)
-    for attempt in range(4):
+    for attempt in range(3):
         if time.time() >= end:
             return None
         all_rate = True
         for m in chain[:4]:
             if time.time() >= end:
                 break
-            r = _post(body, m, budget=max(1, end - time.time()), timeout=30)
+            r = _post(body, m, budget=max(1, end - time.time()), timeout=70)
             if r == "RATE":
                 continue
             if r is None:
@@ -472,7 +483,7 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None):
             all_rate = False
             return _iter_stream(r, on_delta)
         if all_rate:
-            wait = min(6 + attempt * 8, 45)
+            wait = min(2 + attempt * 2, 8)
             time.sleep(max(0.0, min(wait, end - time.time())))
             continue
     return None

@@ -18,17 +18,17 @@ LOGO = r"""
 |_| \_\_____|_|  |_|
 """
 DEBUG = os.environ.get("REM_DEBUG", "0") == "1"
-MODEL_CHAT = "qwen/qwen3.8-27b"
+MODEL_CHAT = "openai/gpt-oss-120b"
 MODEL_CLONE = "openai/gpt-oss-120b"
 MODEL_VISION = "meta-llama/llama-3.2-11b-vision-instruct"
 MODEL_FB = ["openai/gpt-oss-20b", "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct"]
 MODEL_PREF_CHAT = [
-    "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
-    "qwen/qwen3-32b", "llama-3.3-70b-versatile", "qwen/qwen3-8b",
+    "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+    "qwen/qwen3-8b",
 ]
 MODEL_PREF_CLONE = [
     "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-    "qwen/qwen3-32b", "llama-3.3-70b-versatile", "qwen/qwen3-8b",
+    "qwen/qwen3-8b",
 ]
 MODEL_PREF_VISION = [
     "meta-llama/llama-3.2-11b-vision-instruct", "openai/gpt-oss-120b",
@@ -36,8 +36,8 @@ MODEL_PREF_VISION = [
 ]
 MODEL_PREF_FB = [
     "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b",
-    "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct",
-    "groq/compound", "groq/compound-mini", "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-8b",
+    "groq/compound", "groq/compound-mini",
 ]
 CTX_TOTAL = 20000       # tổng ký tự tối đa context sau trim (giới hạn cứng chống tràn)
 CTX_CAP = 5000          # độ dài tối đa mỗi message content

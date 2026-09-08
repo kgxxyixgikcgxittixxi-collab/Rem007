@@ -83,6 +83,13 @@ def _sys(manager, sid, cwd):
             "- Nếu chủ nhân nói 'KHÔNG'/'đừng'/'cấm' việc gì cụ thể: không làm việc đó.\n"
             "- Khi nhận lệnh mới, ưu tiên làm theo lệnh mới nhất của chủ nhân.\n"
             "- TỐI ĐA HOÁ TỐC ĐỘ: chạy ĐÚNG số tool TỐI THIỂU cần thiết. Gom nhiều lệnh vào 1 bash.\n"
+            "- GHI FILE LỚN (>5KB): KHÔNG bao giờ tạo nội dung khổng lồ trong 1 tool call duy nhất\n"
+            "  (dễ bị mạng cắt giữa chừng → thất bại lặp lại). Ghi thành NHIỀU BƯỚC NHỎ:\n"
+            "  MỖI BƯỚC bám tối đa ~2000 KÝ TỰ (10-20 dòng). Bước 1 dùng write_file phần đầu,\n"
+            "  các bước sau nối tiếp bằng bash: cat >> file <<'XEOF' ... XEOF\n"
+            "  LUÔN giữ tiến độ: mỗi bước chỉ thêm DỮ LIỆU MỚI, KHÔNG ghi lại toàn bộ file.\n"
+            "  CẤM dùng write_file cho file ĐÃ CÓ nội dung (>1KB) — lúc đó CHỈ nối thêm bằng cat >>. "
+            "File >1KB chỉ được tạo bằng write_file ĐÚNG 1 lần ở bước đầu tiên.\n"
             "  Đủ thông tin trả lời là DỪNG tool NGAY và trả lời. CẤM tự ý làm thêm việc KHÔNG có trong yêu cầu\n"
             "  (không ping, không quét mạng, không cài thêm, không kiểm tra bổ sung).\n"
             "  CẤM hỏi 'muốn làm tiếp không' hay đề xuất công việc khác khi người dùng chưa yêu cầu."
@@ -209,7 +216,13 @@ class Agent:
                     if self.cancel.wait(min(3 * (_ + 1), 20)):
                         return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
                 if not reply:
-                    return "[LOI] Groq không phản hồi (quota/rate-limit). Chờ 1 lúc rồi gõ lại, hoặc /keys."
+                    # KHÔNG bỏ cuộc giữa chừng: còn thời gian → bước kế thử lại.
+                    # Chỉ TẠM DỪNG khi hết deadline — session còn nguyên → gõ 'tiếp tục'.
+                    if time.time() < deadline - 5:
+                        self._emit({"type": "retry"})
+                        time.sleep(2)
+                        continue
+                    return "[TẠM DỪNG] Groq đang quá tải/quota hết — hết thời gian lượt này, công việc chưa xong. Gõ 'tiếp tục' để chạy nốt đoạn còn dang dở."
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
                     if turn > 1:

@@ -23,6 +23,9 @@ P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối (chỉ tiền tố, n�
 P_AGENT = "\033[34mRem>\033[0m "       # xanh biển
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
+# Số lần TỰ ĐỘNG chạy tiếp tối đa khi 1 lượt bị cắt giữa chừng (hết giờ/quota/bước)
+# Cao để chạy 24/7: mỗi lượt được quyền tối đa MAX_TASK_SECONDS, tổng lên tới ~40 phút/task.
+AUTO_RESUME_MAX = 8
 # Bộ khung spinner của opencode (packages/tui/src/component/spinner.tsx)
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # Nhãn tool theo phong cách opencode (InlineTool/ToolStatusTitle)
@@ -159,8 +162,9 @@ def _diff_preview(name, args):
 
 
 class Repl:
-    def __init__(self, manager):
+    def __init__(self, manager, headless=None):
         self.manager = manager
+        self.headless = headless      # None = REPL tương tác; còn lại = chạy 1 task rồi thoát
         self.sid = sessions.new()
         self.presets = "build"
         self.q = queue.Queue()
@@ -170,6 +174,7 @@ class Repl:
         self._status_since = 0.0
         self._spin_start = 0.0
         self._spin_on = False
+        self._last_out = None
         self._tool_rows = []      # các dòng tool đã xong (giống timeline opencode)
         self._cur_title = ""
         self._live_n = 0          # số ký tự model đang soạn (stream) — hiện tiến độ
@@ -225,11 +230,27 @@ class Repl:
         self._spin_start = time.time()
         if self._status_since <= 0:
             self._status_since = time.time()
+        is_tty = sys.stdout.isatty() and not config.DEBUG
+        last_msg = None
+        last_warn = 0
         while self._spin_on:
+            msg = self._status_msg or ""
+            if not is_tty:
+                # Không animate frame — CHÌ in lại khi trạng thái THAY ĐỔI.
+                # Tránh "treo" hiện ra hàng trăm dòng lặp lại trong log/pipe.
+                cur = re.sub(r"\x1b\[[0-9;]*m", "", msg).strip()
+                if cur and cur != last_msg:
+                    w = int(time.time() - self._status_since)
+                    tag = f"  [{w}s]{'  ⏳ lâu quá — /stop nếu kẹt' if w >= config.TOOL_SLOW_WARN else ''}"
+                    _p(f"  {cur}" + (tag if w >= 3 else ""), "dim")
+                    last_msg = cur
+                    last_warn = w
+                time.sleep(0.5)
+                continue
             f = SPIN[i % len(SPIN)]
             el = int(time.time() - self._spin_start)
             wait = time.time() - self._status_since
-            base = f"  {self._status_msg}" if self._status_msg else ""
+            base = f"  {msg}" if msg else ""
             if self._live_n > 0:
                 base += f" · {self._live_n} ký tự"
             if el >= 60:
@@ -241,10 +262,10 @@ class Repl:
                 col = "\033[91m"
             else:
                 col = "\033[36m"
-            # kiểu opencode: frame spinner màu + nội dung mờ
+            # kiểu opencode: frame spinner màu + nội dung mờ — chậm hơn để bớt "nháy"
             sys.stdout.write("\r" + col + f + C["dim"] + base[:150] + C["reset"] + "\033[K")
             sys.stdout.flush()
-            time.sleep(0.08)
+            time.sleep(0.25)
             i += 1
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
@@ -254,6 +275,20 @@ class Repl:
         sys.stdout.flush()
 
 # ── worker: xử lý câu hỏi theo hàng đợi, cho phép soạn câu mới chờ lượt ──
+    def _pause_kind(self, out):
+        """Phân loại kết cục của 1 lượt: None = xong hẳn; 'user' = /stop (KHÔNG tự làm tiếp);
+        'quota'|'time'|'step' = bị cắt giữa chừng → TỰ ĐỘNG chạy tiếp."""
+        s = (out or "").strip()
+        if s.startswith("[ĐÃ DỪNG] theo yêu cầu"):
+            return "user"
+        if s.startswith("[TẠM DỪNG]"):
+            return "quota"
+        if s.startswith("[ĐÃ DỪNG] chạy quá"):
+            return "time"
+        if s.startswith("[DUNG]") or s.startswith("[DỪNG]"):
+            return "step"
+        return None
+
     def _worker(self):
         while True:
             kind, payload = self.q.get()
@@ -294,6 +329,31 @@ class Repl:
                     out = self._agent.run(payload)
                 except Exception as e:
                     out = f"[LỖI] {type(e).__name__}: {e}"
+                # TỰ ĐỘNG chạy tiếp nếu bị cắt giữa chừng (hết giờ/quota/bước) —
+                # không bắt người dùng gõ 'tiếp tục'. /stop thì tôn trọng, không tự làm tiếp.
+                auto_runs = 0
+                quota_streak = 0
+                while auto_runs < AUTO_RESUME_MAX:
+                    pk = self._pause_kind(out)
+                    if not pk or pk == "user":
+                        break
+                    if pk == "quota":
+                        quota_streak += 1
+                        if quota_streak >= 3:
+                            _p("Groq quá tải kéo dài — dừng chế độ tự chạy tiếp.", "rd")
+                            break
+                    else:
+                        quota_streak = 0
+                    auto_runs += 1
+                    _p(f"[auto] lượt bị cắt ({pk}) — tự động chạy tiếp lần {auto_runs}...", "di")
+                    try:
+                        out = self._agent.run("[tự động tiếp tục] Tiếp tục HOÀN THÀNH nốt công việc DANG DỞ: nếu đang ghi file lớn thì CHỈ nối thêm phần còn thiếu bằng cat >> (lệnh cấm chiếu theo hướng dẫn), CẤM ghi lại toàn bộ file đã có nội dung. Không hỏi lại, không lặp. Xong mới kết thúc.")
+                    except Exception as e:
+                        out = f"[LỖI] {type(e).__name__}: {e}"
+                        break
+                if auto_runs >= AUTO_RESUME_MAX:
+                    _p(f"Đã tự chạy tiếp {AUTO_RESUME_MAX} lần chưa xong — nếu vẫn kẹt hãy báo lại bằng /stop.", "ye")
+                self._last_out = out
                 self._spin_on = False
                 self._busy = False
                 spin.join(timeout=1)      # đợi spinner bỏ dòng cuối xong
@@ -595,16 +655,26 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
 
     def run(self):
         self._clear()
-        try:
-            print(_logo_banner())
-        except Exception:
-            pass
-        _p(f"Gõ /help | /status | /stop | /clear | /exit", "dim")
         if not groq.keys():
             _p(f"⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
-        _p(f"Đang khởi chạy extensions...", "dim")
+        if self.headless is None:
+            try:
+                print(_logo_banner())
+            except Exception:
+                pass
+            _p(f"Gõ /help | /status | /stop | /clear | /exit", "dim")
+            _p(f"Đang khởi chạy extensions...", "dim")
         self.manager.start_all()
         threading.Thread(target=self._worker, daemon=True).start()
+        if self.headless is not None:
+            # headless: chạy ĐÚNG 1 task, tự động tiếp nối nếu bị cắt, rồi thoát (exit=0 nếu xong)
+            self.q.put(("task", self.headless))
+            while not self._busy:
+                time.sleep(0.1)
+            while self._busy:
+                time.sleep(0.5)
+            self.q.put(("quit", None))
+            return
         while True:
             try:
                 line = input(self._prompt_hint()).strip()
