@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.25: **Subagent** (`task` — agent con chạy độc lập kiểu opencode Task, đủ tool riêng + session riêng), **MCP server ngoài** qua `~/.rem_ai/mcp.json` (stdio, có `/mcp` `/mcp reload`), **`/init`** sinh `AGENTS.md`, **diff preview** khi xác nhận quyền (apply_patch/edit/write). Trước đó v3.24: **LSP** (clangd/pylsp: diagnostics/definition/references/symbols/hover) + `/lsp <file>`.
+> v3.26: **Desktop Linux** (`desktop_linux` — điều khiển desktop qua AT-SPI, không cần screenshot: dl_tree/click/type/key/mouse/clipboard) + gpt-oss-120b làm model chat + **auto-resume** khi dừng giữa chừng (quota/time/lỗi) + headless mode `Remtm run "<task>"`. v3.26.1: gpt-oss `reasoning_effort=low` cho phản hồi nhanh hơn. Trước đó v3.25: **Subagent** (`task` — agent con chạy độc lập kiểu opencode Task, đủ tool riêng + session riêng), **MCP server ngoài** qua `~/.rem_ai/mcp.json` (stdio, có `/mcp` `/mcp reload`), **`/init`** sinh `AGENTS.md`, **diff preview** khi xác nhận quyền (apply_patch/edit/write). V3.24: **LSP** (clangd/pylsp: diagnostics/definition/references/symbols/hover) + `/lsp <file>`.
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
