@@ -9,7 +9,9 @@ SPECS = [
     {"name": "webtool", "module": "webtool", "desc": "tìm web, đọc web, GitHub API"},
     {"name": "memory", "module": "memory_server", "desc": "bộ nhớ dài hạn graph.json"},
     {"name": "lsp", "module": "lsp_server", "desc": "LSP: clangd/pylsp (diagnostics, định nghĩa, tham chiếu, symbol, hover)"},
-    {"name": "desktop_linux", "module": "desktop_linux", "desc": "điều khiển desktop Linux qua AT-SPI (không cần screenshot): cây UI, click, gõ phím, chuột, clipboard"},
+    {"name": "desktop_linux", "module": "desktop_linux", "desc": "điều khiển desktop Linux qua AT-SPI (cây UI, click, gõ phím, chuột, clipboard)"},
+    {"name": "browser_auto", "module": "browser_auto", "desc": "trình duyệt bằng Playwright: điều khiển web, YouTube, dashboard, screenshot"},
+    {"name": "media_tools", "module": "media_tools", "desc": "làm video: TTS tiếng Việt, ảnh AI, ghép scene Shorts, cắt/nối/đổi cỡ (ffmpeg)"},
 ]
 
 # MCP servers NGOÀI do người dùng khai báo (kiểu opencode.json):

@@ -70,6 +70,22 @@ if command -v pkg >/dev/null 2>&1; then
     pkg install -y clang 2>/dev/null || true   # clang cung cấp clangd
 fi
 
+# ── 2c. Trình duyệt tự động (browser_*) + làm video (media_*) ─────────────
+echo "[i] Cài Playwright chromium (trình duyệt tự động)..."
+if ! "$PY" -c "import playwright" >/dev/null 2>&1; then
+    _pip "playwright>=1.40" || echo "[!] playwright chưa cài được — browser_* sẽ không dùng được."
+fi
+if "$PY" -c "import playwright" >/dev/null 2>&1; then
+    "$PY" -m playwright install chromium 2>/dev/null || "$PY" -m playwright install chromium 2>/dev/null || true
+fi
+echo "[i] Cài edge-tts + gTTS (đọc tiếng Việt cho video)..."
+if ! "$PY" -c "import edge_tts" >/dev/null 2>&1; then
+    _pip "edge-tts>=6.1" || true
+fi
+if ! "$PY" -c "import gtts" >/dev/null 2>&1; then
+    _pip "gTTS>=2.3" || true
+fi
+
 # ── 3. Thiết lập keys.sqlite + thư mục ──────────────────────────────────
 DIR="$HOME/.rem_ai"
 mkdir -p "$DIR"

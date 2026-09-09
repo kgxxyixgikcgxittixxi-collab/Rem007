@@ -37,6 +37,15 @@ _TOOL_LABEL = {
     "ensure_tool": "Setup", "pip_install": "PyPI", "github_api": "GitHub",
     "todo_list": "Todo", "todo_write": "Todo", "task": "Task",
     "log": "Log", "kill": "Kill",
+    "browser_open": "Browser", "browser_navigate": "Browser", "browser_click": "Click",
+    "browser_click_text": "ClickText", "browser_type": "Type", "browser_press": "Key",
+    "browser_screenshot": "Shot", "browser_content": "Page", "browser_eval": "JS",
+    "browser_wait": "Wait", "browser_scroll": "Scroll", "browser_search": "BSearch",
+    "browser_back": "Back", "browser_close": "Close",
+    "media_tts": "TTS", "media_image": "ImgGen", "media_scene": "Scene",
+    "media_slideshow": "Shorts", "media_concat": "Concat", "media_info": "Probe",
+    "media_trim": "Trim", "media_scale": "Scale", "media_to_gif": "GIF",
+    "media_overlay_text": "Overlay", "media_extract_audio": "Audio",
 }
 
 
@@ -424,10 +433,12 @@ class Repl:
 
     def _keys(self):
         ks = groq.keys()
-        _p(f"Có {len(ks)} Groq keys trong DB", "bold")
-        for k in ks:
-            print("  " + k[:14] + "..." + k[-6:])
-        _p("Thêm key: /key gsk_...", "dim")
+        ok = groq._km.ok_keys(ks)
+        st = groq._km.stats_summary()
+        _p(f"Có {len(ks)} Groq keys — {ok} sẵn sàng dùng", "bold")
+        if st:
+            print(st)
+        _p("Thêm key: /key gsk_...   |   /keys reset  để xoá stats đã học", "dim")
 
     def _clear(self):
         self._clear_spin_line()
@@ -613,6 +624,18 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             self._init_agents()
         elif cmd == "/keys":
             self._keys()
+        elif cmd.startswith("/keys reset") or cmd == "/keys reset":
+            try:
+                os.remove(os.path.join(config.DIR, "key_stats.json"))
+            except Exception:
+                pass
+            try:
+                from providers import groq as _g
+                _g._km._stats.clear()
+                _g._km._rpm_hist.clear()
+            except Exception:
+                pass
+            _p("Đã xoá stats key đã học.", "gr")
         elif cmd == "/checkupdate":
             rv = updater.remote_version()
             if not rv:

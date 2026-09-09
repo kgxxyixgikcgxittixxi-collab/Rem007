@@ -1,4 +1,4 @@
-import json, os, time, threading
+import json, os, time, threading, hashlib
 
 import config
 import sessions
@@ -8,12 +8,9 @@ MAX_STEPS = config.MAX_STEPS
 CHECKPOINT_EVERY = config.CHECKPOINT_EVERY
 MAX_TURNS = config.MAX_TURNS
 
-# Trần chờ mỗi lượt gọi LLM: đủ cho trả lời dài nhưng nếu Groq lỗi mạng/quota
-# thì bỏ cuộc NHANH (không đứng im cả mấy phút) → trả lỗi sớm rõ ràng.
 _CALL_BUDGET = 60
-# Tổng thời gian một BƯỚC (1 lượt LLM + retry) — nếu quota cạn thì không để retry
-# nuốt hết cả MAX_TASK_SECONDS. Rate-limit dồn → bỏ sớm để báo lỗi rõ, không vờn mãi.
 _STEP_BUDGET = 75
+_SELF_HEAL_MAX_RETRIES = 3
 
 
 def _budget(deadline, step_deadline=None):
@@ -120,7 +117,21 @@ def _sys(manager, sid, cwd):
             "Trước khi chạy/biên dịch, luôn lsp_diagnostics để tự sửa lỗi tĩnh."
             "\nSỬ DỤNG SUBAGENT: Với nhiệm vụ tách biệt nặng (quét toàn repo, viết code độc lập, "
             "tra cứu song song), dùng task(description) — agent con có đủ tool riêng. "
-            "Mô tả rõ việc + format kết quả cần trả về. Không dùng task cho việc nhỏ gọi trực tiếp được."
+            "Mô tả rõ việc + format kết quả cần trả về. Không dùng task cho việc nhỏ gọi trực tiếp được.\n"
+            "HƯỚNG DẪN DÙNG TOOL ĐẶC THÙ:\n"
+            "- LÀM GAME: dùng write_file/apply_patch tạo mã (pygame/js/html), rồi py_compile hoặc chạy smoke-test "
+            "bằng bash. Xác nhận file tồn tại bằng list_dir rồi báo.\n"
+            "- TRÌNH DUYỆT (browser_*): mở trang bằng browser_open(url) → tương tác browser_click/browser_type/ "
+            "browser_press → lấy nội dung browser_content → chụp browser_screenshot. Trang đăng nhập: dùng CSS "
+            "selector chính xác cho browser_type (vd input[name=..]), sau đó browser_click nút. Screenshot trả về "
+            "là đường dẫn PNG tuyệt đối. Profile trình duyệt được lưu → đăng nhập giữ qua các lượt.\n"
+            "- LÀM VIDEO (media_*): quy trình 1 phân cảnh = media_tts(text) tạo mp3 + media_image(prompt) tạo ảnh "
+            " + media_scene(ảnh,audio,text=chữ nổi) ra mp4. Nhiều phân cảnh thì media_concat(files). "
+            "Nhanh hơn: media_slideshow với JSON {'scenes':[{'text':..,'prompt':..}], 'out':'ten'}. "
+            "Lấy thông tin bằng media_info, cắt media_trim, đổi cỡ Shorts media_scale.\n"
+            "- TẢI/ĐỌC nội dung đơn giản: web_search/web_fetch là nhẹ nhất, browser_* chỉ khi cần JS/đăng nhập.\n"
+            "- KEY GROQ: nhiều key xoay vòng tự động với circuit breaker — khi Groq trả 429 liên tục agent tự "
+            "cooldown và chuyển key khác; nếu hết key thì báo lỗi rõ, đừng tự thử lại mãi.\n"
             f"{agents_section}"
         ),
     }
@@ -134,6 +145,9 @@ class Agent:
         self.askfn = None
         self.on_event = on_event
         self.cancel = threading.Event()
+        self._error_patterns = {}  # pattern -> count (self-healing: track recurring errors)
+        self._tool_fingerprints = set()  # track which tools have been called with what args
+        self._task_hash = ""  # fingerprint of current task for resume
 
     def _emit(self, ev):
         if self.on_event:
@@ -146,7 +160,6 @@ class Agent:
         self.cancel.set()
 
     def _check_stop(self, deadline):
-        """Trả message dừng nếu cancel hoặc hết giờ chống treo, else None."""
         if self.cancel.is_set():
             return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
         if deadline and time.time() > deadline:
@@ -159,6 +172,31 @@ class Agent:
             return f"[ĐÃ DỪNG] chạy quá {s} (giới hạn chống treo). Gõ 'tiếp tục' để chạy thêm."
         return None
 
+    def _track_error(self, error_msg):
+        """Track recurring error patterns for self-healing."""
+        # Extract pattern: first 80 chars of error
+        pattern = (error_msg or "")[:80]
+        if pattern:
+            self._error_patterns[pattern] = self._error_patterns.get(pattern, 0) + 1
+
+    def _should_self_heal(self, error_msg):
+        """Check if we've seen this error before and should try alternative approach."""
+        pattern = (error_msg or "")[:80]
+        return self._error_patterns.get(pattern, 0) >= 2
+
+    def _tool_fingerprint(self, name, args):
+        """Generate fingerprint for tool call to detect loops."""
+        key = f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)[:200]}"
+        return hashlib.md5(key.encode()).hexdigest()[:12]
+
+    def _is_looping(self, name, args):
+        """Detect if agent is calling same tool with same args repeatedly."""
+        fp = self._tool_fingerprint(name, args)
+        if fp in self._tool_fingerprints:
+            return True
+        self._tool_fingerprints.add(fp)
+        return False
+
     def _cwd(self):
         try:
             return self.manager.call("cwd", {}, 10).strip()
@@ -166,12 +204,14 @@ class Agent:
             return "?"
 
     def run(self, user_text):
-        """Chạy agent tới khi xong việc. Tự chuyển đợt (turn) mới khi hết MAX_STEPS mà
-        LLM vẫn còn tool_calls — không cần người dùng phải gõ 'tiếp tục'. Chỉ dừng khi:
-        LLM trả content không kèm tool (task xong), /stop, lỗi Groq, hoặc hết MAX_TURNS."""
+        """Chạy agent với self-healing: tự detect loop, tự recover lỗi, tự validate kết quả."""
         self.cancel.clear()
+        self._error_patterns.clear()
+        self._tool_fingerprints.clear()
+        self._task_hash = hashlib.md5(user_text.encode()).hexdigest()[:16]
         sessions.append(self.sid, {"role": "user", "content": user_text})
         deadline = time.time() + config.MAX_TASK_SECONDS
+        last_tool_errors = []  # track recent tool errors for self-healing
         for turn in range(1, MAX_TURNS + 1):
             stopped = self._check_stop(deadline)
             if stopped:
@@ -197,11 +237,8 @@ class Agent:
                 msgs = sessions.trim(msgs)
                 self._emit({"type": "llm", "step": step + 1, "turn": turn})
                 reply = None
-                # retry với backoff khi Groq không phản hồi (rate-limit/quota).
-                # step_deadline giới hạn TỔNG thời gian cả bước (≤75s) — nếu quota cạn
-                # thì bỏ cuộc sớm thay vì để các retry nuốt hết MAX_TASK_SECONDS.
                 step_deadline = time.time() + _STEP_BUDGET
-                for _ in range(5):
+                for retry_i in range(5):
                     stopped = self._check_stop(deadline)
                     if stopped:
                         return stopped
@@ -213,11 +250,9 @@ class Agent:
                     if reply:
                         break
                     self._emit({"type": "retry"})
-                    if self.cancel.wait(min(3 * (_ + 1), 20)):
+                    if self.cancel.wait(min(3 * (retry_i + 1), 20)):
                         return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
                 if not reply:
-                    # KHÔNG bỏ cuộc giữa chừng: còn thời gian → bước kế thử lại.
-                    # Chỉ TẠM DỪNG khi hết deadline — session còn nguyên → gõ 'tiếp tục'.
                     if time.time() < deadline - 5:
                         self._emit({"type": "retry"})
                         time.sleep(2)
@@ -226,7 +261,6 @@ class Agent:
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
                     if turn > 1:
-                        # đợt sau: ghi tóm tắt cuối, dừng
                         content = reply.get("content") or ""
                     else:
                         content = reply.get("content") or "(rỗng)"
@@ -257,6 +291,12 @@ class Agent:
                         args = json.loads(fn.get("arguments") or "{}")
                     except ValueError:
                         args = {}
+                    # SELF-HEALING: detect loops
+                    if self._is_looping(name, args):
+                        sessions.append(self.sid, {"role": "tool", "tool_call_id": tc.get("id"),
+                            "name": name, "content": "[SELF-HEAL] Phát hiện gọi lặp lại cùng thao tác. Hãy thử cách khác hoặc bỏ qua bước này."})
+                        self._emit({"type": "tool_done", "name": name, "result": "[loop detected]"})
+                        continue
                     args_note = str(args)[:120]
                     self._emit({"type": "tool_start", "name": name, "args": args, "args_note": args_note})
                     if not self.perm.decide(name, args, askfn=self.askfn):
@@ -273,6 +313,14 @@ class Agent:
                             result = self.manager.call(name, args, timeout=to)
                         except Exception as e:
                             result = f"[LOI CHAY TOOL] {type(e).__name__}: {e}"
+                    # SELF-HEALING: track errors and inject recovery hints
+                    if result and (result.startswith("[LOI]") or result.startswith("[TOOL LOI]")):
+                        self._track_error(result)
+                        last_tool_errors.append((name, result[:200]))
+                        if len(last_tool_errors) > 5:
+                            last_tool_errors.pop(0)
+                        if self._should_self_heal(result):
+                            result += "\n[SELF-HEAL] Lỗi này đã xảy ra nhiều lần. Hãy thử hướng khác: đổi tool, đổi tham số, hoặc bỏ qua bước này."
                     self._emit({"type": "tool_done", "name": name, "result": str(result)[:200]})
                     sessions.append(
                         self.sid,
@@ -281,11 +329,11 @@ class Agent:
                 msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
                 if (step + 1) % CHECKPOINT_EVERY == 0:
                     try:
-                        cp = sessions.checkpoint(self.sid, step + 1, msgs)
+                        summary = f"task={self._task_hash} turn={turn} step={step+1} errors={len(self._error_patterns)}"
+                        cp = sessions.checkpoint(self.sid, step + 1, msgs, summary=summary)
                         self._emit({"type": "checkpoint", "path": cp, "step": step + 1})
                     except Exception:
                         pass
-            # đã chạy hết MAX_STEPS mà vẫn còn tool_calls → tự chuyển đợt mới
             self._emit({"type": "turn_roll", "turn": turn})
         return "[DUNG] đã tới giới hạn tổng số bước. Gõ 'tiếp tục' nếu muốn chạy thêm nữa."
 

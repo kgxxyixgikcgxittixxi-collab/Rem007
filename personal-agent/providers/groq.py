@@ -255,19 +255,238 @@ def fb_models():
     return resolve(MODEL_PREF_FB)
 
 
-_RR = [0]
-_COOL = {}  # key -> cooldown until ts
 _RATE = (413, 429)
-# Lỗi mạng/read-timeout: KHÔNG retry dồn dập — thoát nhanh cho khỏi treo
 _NET_ERRS = ("ReadTimeout", "ConnectTimeout", "ConnectionError", "ReadError",
              "RemoteDisconnected", "ChunkedEncodingError", "ProxyError")
+# Lỗi 5xx/408: server quá tải → backoff ngắn + jitter rồi thử tiếp (không đốt cooldown)
+_SERVER_ERRS = (500, 502, 503, 504, 408)
+
+_STATS_FILE = os.path.join(DIR, "key_stats.json")
+_STATS_SAVE_EVERY = 20      # lưu stats sau mỗi N sự kiện báo cáo (tránh ghi nhiều)
+
+
+def _parse_retry_after(v):
+    """Retry-After có thể là giây hoặc HTTP-date → trả về số giây chờ, else None."""
+    if not v:
+        return None
+    v = str(v).strip()
+    if v.isdigit():
+        return int(v)
+    try:
+        from email.utils import parsedate_to_datetime
+        d = parsedate_to_datetime(v)
+        return max(0, int(d.timestamp() - time.time()))
+    except Exception:
+        return None
+
+
+class KeyManager:
+    """Quản lý nhiều Groq key (mỗi key 1 tài khoản độc lập) với:
+    - Token bucket per key (RPM → chủ động tiết lưu, tránh 429 ngay từ đầu)
+    - Circuit breaker cho key hỏng/auth lỗi
+    - Cooldown theo Retry-After, leo thang khi 429 liên tiếp (quota cửa sổ cạn)
+    - Backoff + jitter cho lỗi 5xx/mạng
+    - Stats lưu file → học được key nào tốt, sống sót qua restart
+    Áp dụng các pattern: liteLLM weighted routing, token-bucket (pierringshot/groq-api),
+    circuit breaker (resilience4j)."""
+
+    def __init__(self):
+        self._rr = 0
+        self._stats = {}        # key -> dict thống kê
+        self._rpm_hist = {}     # key -> deque timestamps request (token bucket)
+        self._lock = threading.Lock()
+        self._dirty = 0
+        self._CIRCUIT_THRESHOLD = 5      # lỗi liên tiếp trước khi mở circuit
+        self._CIRCUIT_RECOVERY = 90      # giây trước khi half-open
+        self._COOLDOWN_BASE = 30         # cooldown tối thiểu khi 429
+        self._COOLDOWN_DEFAULT = 50      # khi không có Retry-After
+        self._COOLDOWN_SCALE = 60        # leo thang thêm mỗi đợt 429 liên tiếp
+        self._COOLDOWN_MAX = 900         # trần cooldown (15 phút)
+        self._RPM_SAFE = 26              # token bucket: tối đa yêu cầu/phút mỗi key (Groq ~30)
+        self._RPM_WINDOW = 60.0
+        self._AUTH_COOLDOWN = 3600       # key 401/403 → đóng 1 giờ
+        # key bị cạn quota cửa sổ (429 nhiều liên tiếp) → cooldown dài (gần như nghỉ hôm nay)
+        self._EXHAUST_COOLDOWN = 1800
+
+    def _get_stats(self, key):
+        s = self._stats.setdefault(key, {
+            "success": 0, "fail": 0, "rate": 0, "net": 0,
+            "last_ok": 0.0, "last_fail": 0.0,
+            "cooldown_until": 0.0, "cooldown_reason": "",
+            "circuit_failures": 0, "circuit_open": False,
+            "rate_streak": 0,
+        })
+        return s
+
+    def _get_hist(self, key):
+        import collections
+        if key not in self._rpm_hist:
+            self._rpm_hist[key] = collections.deque()
+        return self._rpm_hist[key]
+
+    def _save(self):
+        self._dirty += 1
+        if self._dirty % _STATS_SAVE_EVERY != 0:
+            return
+        try:
+            payload = {k: dict(v) for k, v in self._stats.items()}
+            with open(_STATS_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def load(self):
+        try:
+            with open(_STATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._stats = {k: dict(v) for k, v in (data or {}).items()}
+            # quá trình restart → cooldown cũ không còn giá trị, thả lại
+            now = time.time()
+            for s in self._stats.values():
+                if s.get("cooldown_until", 0) - now > 120:
+                    s["cooldown_until"] = now
+        except Exception:
+            pass
+
+    def _tokens_available(self, key, now):
+        """Token bucket: chủ động giới hạn RPM → không tới mức 429 mới biết."""
+        h = self._get_hist(key)
+        while h and now - h[0] > self._RPM_WINDOW:
+            h.popleft()
+        return len(h) < self._RPM_SAFE
+
+    def pick_key(self, available_keys):
+        """Chọn key bằng round-robin trong nhóm key KHỎE (đủ RPM, không cooldown/circuit,
+        không vừa fail). Không để 1 key 'hot' gánh hết — load chia đều để né rate limit."""
+        now = time.time()
+        with self._lock:
+            healthy = []
+            for i in range(len(available_keys)):
+                k = available_keys[(self._rr + i) % len(available_keys)]
+                s = self._get_stats(k)
+                if s["circuit_open"]:
+                    if now - s["last_fail"] < self._CIRCUIT_RECOVERY:
+                        continue
+                    s["circuit_open"] = False
+                    s["circuit_failures"] = max(0, s["circuit_failures"] - 2)
+                if s["cooldown_until"] > now:
+                    continue
+                if not self._tokens_available(k, now):
+                    continue
+                # vừa fail gần đây (30s) → cho hồi phục trước khi xoay lại
+                if now - s["last_fail"] < 30:
+                    continue
+                healthy.append(k)
+            if healthy:
+                choice = healthy[0]
+                self._rr = (self._rr + 1) % len(available_keys)
+                return choice, 0
+            # không key khỏe → chọn key có cooldown ngắn nhất (hoặc RPM thấp nhất)
+            best_wait = float("inf")
+            best_key = None
+            for k in available_keys:
+                s = self._get_stats(k)
+                if s["circuit_open"] and now - s["last_fail"] < self._CIRCUIT_RECOVERY:
+                    continue
+                wait = max(0, s["cooldown_until"] - now)
+                if wait < best_wait:
+                    best_wait = wait
+                    best_key = k
+            if best_key is None:
+                best_score = float("inf")
+                for k in available_keys:
+                    n = len(self._get_hist(k))
+                    if n < best_score:
+                        best_score = n
+                        best_key = k
+            return best_key, best_wait
+
+    def report_success(self, key):
+        with self._lock:
+            s = self._get_stats(key)
+            s["success"] += 1
+            s["last_ok"] = time.time()
+            s["circuit_failures"] = max(0, s["circuit_failures"] - 1)
+            s["rate_streak"] = 0
+            s["cooldown_reason"] = ""
+            now = time.time()
+            h = self._get_hist(key)
+            h.append(now)          # token-bucket ghi nhận request thành công
+            while h and now - h[0] > self._RPM_WINDOW:
+                h.popleft()
+        self._save()
+
+    def report_rate_limit(self, key, retry_after=None):
+        with self._lock:
+            s = self._get_stats(key)
+            s["rate"] += 1
+            s["rate_streak"] += 1
+            s["last_fail"] = time.time()
+            ra = _parse_retry_after(retry_after)
+            base = ra if ra else self._COOLDOWN_DEFAULT
+            base = max(self._COOLDOWN_BASE, base)
+            # leo thang: 429 liên tiếp → cooldown mỗi lần thêm (quota cửa sổ gần cạn)
+            if s["rate_streak"] >= 3:
+                s["cooldown_until"] = time.time() + self._EXHAUST_COOLDOWN
+                s["cooldown_reason"] = "exhausted"
+                s["rate_streak"] = 0
+            elif s["rate_streak"] >= 1:
+                s["cooldown_until"] = time.time() + min(base + s["rate_streak"] * self._COOLDOWN_SCALE, self._COOLDOWN_MAX)
+                s["cooldown_reason"] = f"rate streak={s['rate_streak']}"
+        self._save()
+
+    def report_failure(self, key, is_network=False, is_server=False):
+        with self._lock:
+            s = self._get_stats(key)
+            s["fail"] += 1
+            s["last_fail"] = time.time()
+            s["circuit_failures"] += 1
+            if is_network:
+                s["net"] += 1
+            if s["circuit_failures"] >= self._CIRCUIT_THRESHOLD:
+                s["circuit_open"] = True
+                s["cooldown_reason"] = "circuit_open"
+        self._save()
+
+    def report_auth_fail(self, key):
+        with self._lock:
+            s = self._get_stats(key)
+            s["circuit_open"] = True
+            s["last_fail"] = time.time()
+            s["cooldown_until"] = time.time() + self._AUTH_COOLDOWN
+            s["cooldown_reason"] = "auth"
+        self._save()
+
+    def all_cooldown(self, available_keys):
+        now = time.time()
+        with self._lock:
+            return all(self._get_stats(k)["cooldown_until"] > now for k in available_keys) if available_keys else False
+
+    def stats_summary(self):
+        now = time.time()
+        with self._lock:
+            lines = []
+            for k, s in sorted(self._stats.items(), key=lambda x: -x[1]["success"]):
+                status = "OPEN" if s["circuit_open"] else ("CD" if s["cooldown_until"] > now else "OK")
+                r = s.get("cooldown_reason") or ""
+                lines.append(f"  {k[:14]}... {status:3} ok={s['success']} fail={s['fail']} "
+                             f"rate={s['rate']} net={s['net']}" + (f" [{r}]" if r else ""))
+            return "\n".join(lines)
+
+    def ok_keys(self, available_keys):
+        """Số key đang dùng được ngay (không cooldown, không circuit)."""
+        now = time.time()
+        with self._lock:
+            return sum(1 for k in available_keys
+                       if not self._get_stats(k)["circuit_open"] and self._get_stats(k)["cooldown_until"] <= now)
+
+
+_km = KeyManager()
+_km.load()
 
 
 def _post(body, model, timeout=30, budget=None):
-    """Gọi Groq, vòng key round-robin với cooldown rate-limit.
-    budget (giây) giới hạn cứng tổng thời gian — tránh treo lâu không tự thoát.
-    GPT-OSS nghĩ dài (reasoning_effort mặc định = medium) → lệnh đơn giản chậm.
-    Đặt 'low' cho trả lời nhanh hơn; override bằng biến REM_REASONING=low|medium|high."""
+    """Gọi Groq với KeyManager: weighted key selection, circuit breaker, smart retry."""
     body = dict(body)
     effort = os.environ.get("REM_REASONING", "low").strip().lower()
     if model.startswith("openai/gpt-oss") and effort in ("low", "medium", "high"):
@@ -275,24 +494,18 @@ def _post(body, model, timeout=30, budget=None):
     ks = keys()
     if not ks:
         return None
-    n = len(ks)
     last = None
-    net_fail = 0
+    attempts = 0
+    max_attempts = len(ks) * 2 + 4  # try each key at most twice; extra for backoff rounds
     end = time.time() + (budget if budget and budget > 0 else 75)
-    while time.time() < end:
-        now = time.time()
-        choice = None
-        for i in range(n):
-            k = ks[(_RR[0] + i) % n]
-            if _COOL.get(k, 0) <= now:
-                choice = k
-                _RR[0] = (_RR[0] + 1) % n
-                break
+    import random as _rd
+    while time.time() < end and attempts < max_attempts:
+        attempts += 1
+        choice, wait = _km.pick_key(ks)
         if choice is None:
-            # tất cả keys đang cooldown → chờ key sớm hết hạn nhất (không quá budget)
-            wake = min(_COOL.values())
-            d = max(0.5, min(15.0, wake - now))
-            time.sleep(min(d, max(0.5, end - time.time())))
+            break
+        if wait > 0:
+            time.sleep(min(wait, max(0.5, end - time.time())))
             continue
         to = max(1, min(timeout, int(end - time.time() + 1)))
         try:
@@ -302,26 +515,33 @@ def _post(body, model, timeout=30, budget=None):
                 json={"model": model, **body}, timeout=to,
             )
             if r.status_code == 200:
-                net_fail = 0
+                _km.report_success(choice)
                 return r
             if r.status_code in _RATE:
                 retry = r.headers.get("retry-after")
-                _COOL[choice] = time.time() + (max(30, int(retry)) if retry else 50)
+                _km.report_rate_limit(choice, retry)
                 last = "RATE"
+            elif r.status_code in _SERVER_ERRS:
+                # server quá tải → chờ ngắn + jitter rồi thử key khác (không chặn key)
+                wait = min(2 ** min(attempts, 4), 8) * _rd.uniform(0.7, 1.3)
+                time.sleep(min(wait, max(0.2, end - time.time())))
+                _km.report_failure(choice, is_server=True)
+                last = f"HTTP {r.status_code}"
+                continue
             else:
                 last = f"HTTP {r.status_code}"
-                # lỗi key (401) hoặc model — không phải rate, dừng nhanh
                 if r.status_code in (401, 403):
+                    _km.report_auth_fail(choice)
                     break
+                _km.report_failure(choice)
         except Exception as e:
             last = type(e).__name__
-            net_fail += 1
-            # mạng/timeout liên tiếp → đừng retry dồn dập, thoát nhanh
-            if last in _NET_ERRS and net_fail >= 2:
-                break
+            _km.report_failure(choice, is_network=True)
+            if last in _NET_ERRS:
+                time.sleep(0.5 * _rd.uniform(0.7, 1.3))  # brief jittered backoff
     if last == "RATE":
         return "RATE"
-    if last:
+    if last and (last not in _SERVER_ERRS):
         print(f"[groq] that bai ({model}): {last}", file=__import__("sys").stderr)
     return None
 
