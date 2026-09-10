@@ -78,7 +78,7 @@ def get_platform_status():
     status = []
     for platform in config.SOCIAL_AUTO["platforms"]:
         platform_posts = [p for p in today_posts if p["platform"] == platform]
-        status.append(f"{platform}: {len(platform_posts)}/{config.SOCIAL_AUTO['max_daily_posts']} posts, {len(platform_interactions)} interactions today")
+        status.append(f"{platform}: {len(platform_posts)}/{config.SOCIAL_AUTO['max_daily_posts']} posts")
 
     return "\n".join(status)
 
