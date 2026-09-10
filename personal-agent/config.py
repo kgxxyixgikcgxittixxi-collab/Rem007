@@ -39,6 +39,52 @@ MODEL_PREF_FB = [
     "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-8b",
     "groq/compound", "groq/compound-mini",
 ]
+
+# ── Multi-key Architecture ──────────────────────────────────────────
+KEY_POOLS = {
+    "main": {
+        "purpose": "Chat, coding, web search, general tasks",
+        "model_pref": MODEL_PREF_CHAT,
+        "budget": 120,
+        "max_concurrent": 4,
+    },
+    "media": {
+        "purpose": "TTS, image generation, video processing",
+        "model_pref": MODEL_PREF_VISION,
+        "budget": 300,
+        "max_concurrent": 2,
+    },
+    "desktop": {
+        "purpose": "Desktop control, browser automation",
+        "model_pref": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+        "budget": 60,
+        "max_concurrent": 2,
+    },
+}
+
+# Social Media Automation — 24/7 independent from main tasks
+SOCIAL_AUTO = {
+    "enabled": True,
+    "interval_minutes": 30,
+    "platforms": ["facebook", "youtube", "tiktok", "instagram", "twitter"],
+    "tasks": [
+        "post_content", "reply_comments", "monitor_engagement",
+        "schedule_posts", "analyze_metrics", "follow_targets",
+    ],
+    "max_daily_posts": 20,
+    "max_daily_interactions": 100,
+}
+
+# 24/7 Operation
+OP_247 = {
+    "enabled": True,
+    "auto_resume": True,
+    "auto_restart": True,
+    "health_check_interval": 30,
+    "max_restarts_per_hour": 5,
+    "quiet_hours": (0, 6),
+}
+
 CTX_TOTAL = 20000       # tổng ký tự tối đa context sau trim (giới hạn cứng chống tràn)
 CTX_CAP = 5000          # độ dài tối đa mỗi message content
 SUM_AT = 60             # tóm tắt khi số message trong history vượt ngưỡng này

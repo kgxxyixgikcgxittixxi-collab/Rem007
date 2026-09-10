@@ -13,6 +13,7 @@ SPECS = [
     {"name": "desktop_linux", "module": "desktop_linux", "desc": "điều khiển desktop Linux qua AT-SPI (cây UI, click, gõ phím, chuột, clipboard)"},
     {"name": "browser_auto", "module": "browser_auto", "desc": "trình duyệt bằng Playwright: điều khiển web, YouTube, dashboard, screenshot"},
     {"name": "media_tools", "module": "media_tools", "desc": "làm video: TTS tiếng Việt, ảnh AI, ghép scene Shorts, cắt/nối/đổi cỡ (ffmpeg)"},
+    {"name": "social_auto", "module": "social_auto", "desc": "tự động hóa mạng xã hội 24/7 (Facebook, YouTube, TikTok, Instagram, Twitter)"},
 ]
 
 # MCP servers NGOÀI do người dùng khai báo (kiểu opencode.json):
