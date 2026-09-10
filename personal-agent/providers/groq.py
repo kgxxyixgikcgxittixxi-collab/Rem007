@@ -696,7 +696,7 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None):
         if time.time() >= end:
             return None
         all_rate = True
-        for m in chain[:5]:  # thu toi da 5 model
+        for m in chain[:5]:
             if time.time() >= end:
                 break
             r = _post(body, m, budget=max(1, end - time.time()), timeout=70)
