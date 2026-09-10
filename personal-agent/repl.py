@@ -47,7 +47,10 @@ _TOOL_LABEL = {
     "media_trim": "Trim", "media_scale": "Scale", "media_to_gif": "GIF",
     "media_overlay_text": "Overlay", "media_extract_audio": "Audio",
     "skill_save": "SkillSave", "skill_find": "Skill", "skill_use": "SkillUse",
-    "skill_list": "Skills", "dl_find": "Find", "dl_text": "ReadScreen",
+    "skill_list": "Skills", "exp_lesson_save": "Lesson", "exp_lesson_find": "Lessons",
+    "exp_error_patterns": "ErrPat",     "exp_skill_save": "ExpSkill", "exp_skill_best": "BestSkill",
+    "social_cycle": "Social", "social_report": "SocialRep", "social_status": "SocialSt",
+    "social_post": "SocialPost", "dl_find": "Find", "dl_text": "ReadScreen",
     "dl_status": "DeskStatus", "dl_apps": "Apps", "dl_tree": "DeskTree",
     "dl_click": "Click", "dl_type": "Type", "dl_key": "Key",
 }

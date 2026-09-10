@@ -484,6 +484,33 @@ class KeyManager:
 _km = KeyManager()
 _km.load()
 
+# ── Org-level rate-limit tracker ──────────────────────────────────────
+# Groq giới hạn theo organization, không phải theo key: khi nhiều key liên
+# tiếp cùng trả 429 thì chờ 1 lần theo Retry-After thay vì hammer từng key.
+# Tiến trình làm việc KHÔNG mất: lịch sử tool đã append vào sessions DB ngay
+# sau mỗi tool, còn retry LLM chỉ giữ nguyên msgs và thử lại request đó.
+_ORG = {"until": 0.0, "retry_after": 0, "hits": 0}
+_ORG_LOCK = threading.Lock()
+
+
+def rate_wait_remaining():
+    """Số giây còn phải chờ do rate-limit org-level (0 = không phải chờ)."""
+    with _ORG_LOCK:
+        return max(0.0, _ORG["until"] - time.time())
+
+
+def _note_org_rate(retry_after=None):
+    """Ghi nhận 1 hit 429 org-level, trả về số giây nên chờ."""
+    with _ORG_LOCK:
+        ra = _parse_retry_after(retry_after)
+        wait = ra if ra else 8
+        wait = max(2, min(wait, 60))
+        now = time.time()
+        _ORG["hits"] += 1
+        _ORG["retry_after"] = wait
+        _ORG["until"] = max(_ORG["until"], now + wait)
+        return wait
+
 
 def _post(body, model, timeout=30, budget=None):
     """Gọi Groq với KeyManager: weighted key selection, circuit breaker, smart retry."""
@@ -496,10 +523,16 @@ def _post(body, model, timeout=30, budget=None):
         return None
     last = None
     attempts = 0
-    max_attempts = len(ks) * 2 + 4  # try each key at most twice; extra for backoff rounds
+    rate_hits = 0
+    max_attempts = min(len(ks) + 4, 16)  # xoay key nhưng chặn hammer khi 429 org-level
     end = time.time() + (budget if budget and budget > 0 else 75)
     import random as _rd
     while time.time() < end and attempts < max_attempts:
+        # Org-level 429 đang active → chờ 1 lần duy nhất, không thử từng key vô ích
+        rem = rate_wait_remaining()
+        if rem > 1:
+            time.sleep(min(rem, max(0.5, end - time.time()), 15))
+            continue
         attempts += 1
         choice, wait = _km.pick_key(ks)
         if choice is None:
@@ -520,7 +553,15 @@ def _post(body, model, timeout=30, budget=None):
             if r.status_code in _RATE:
                 retry = r.headers.get("retry-after")
                 _km.report_rate_limit(choice, retry)
+                _note_org_rate(retry)
+                rate_hits += 1
                 last = "RATE"
+                # Nhiều key liên tiếp cùng 429 = giới hạn org → ngủ 1 lần rồi thử tiếp
+                if rate_hits >= 3:
+                    rem = rate_wait_remaining()
+                    if rem > 1:
+                        time.sleep(min(rem, max(0.5, end - time.time()), 20))
+                    rate_hits = 0
             elif r.status_code in _SERVER_ERRS:
                 # server quá tải → chờ ngắn + jitter rồi thử key khác (không chặn key)
                 wait = min(2 ** min(attempts, 4), 8) * _rd.uniform(0.7, 1.3)
@@ -696,11 +737,18 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None):
         if time.time() >= end:
             return None
         all_rate = True
+        rate_models = 0
         for m in chain[:5]:
             if time.time() >= end:
                 break
             r = _post(body, m, budget=max(1, end - time.time()), timeout=70)
             if r == "RATE":
+                rate_models += 1
+                # Đã 2 model cùng 429 = giới hạn org → chờ 1 lần, khỏi thử 3 model còn lại vô ích
+                if rate_models >= 2:
+                    rem = rate_wait_remaining()
+                    if rem > 2 and time.time() < end:
+                        time.sleep(min(rem, max(0.5, end - time.time()), 12))
                 continue
             if r is None:
                 all_rate = False

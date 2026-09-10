@@ -32,6 +32,17 @@ def _load_skills_prompt():
         return ""
 
 
+def _load_experience_prompt():
+    """Nạp kinh nghiệm đã học (lessons + procedural skills) — compact, chống tràn context."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import experience as _exp
+        section = _exp.get_experience_prompt(preview=True)
+        return ("\n\nKINH NGHIỆM ĐÃ HỌC (đúng thì làm theo, sai thì tránh lặp lại):\n" + section) if section else ""
+    except Exception:
+        return ""
+
+
 def _load_agents_md(cwd):
     """Scan thư mục project cho AGENTS.md/CLAUDE.md — inject vào system prompt."""
     instructions = []
@@ -68,6 +79,7 @@ def _sys(manager, sid, cwd):
     agents_md = _load_agents_md(cwd)
     agents_section = f"\n\nHƯỚNG DẪN DỰ ÁN (từ AGENTS.md):\n{agents_md}" if agents_md else ""
     skills_section = _load_skills_prompt()
+    exp_section = _load_experience_prompt()
     return {
         "role": "system",
         "content": (
@@ -162,6 +174,7 @@ def _sys(manager, sid, cwd):
             "cooldown và chuyển key khác; nếu hết key thì báo lỗi rõ, đừng tự thử lại mãi.\n"
             f"{agents_section}"
             f"{skills_section}"
+            f"{exp_section}"
         ),
     }
 
@@ -298,14 +311,34 @@ class Agent:
                     )
                     if reply:
                         break
+                    # Tiến trình KHÔNG mất: mọi kết quả tool đã append vào sessions DB
+                    # ngay sau mỗi tool; retry LLM chỉ giữ nguyên msgs và thử lại.
+                    try:
+                        wait = groq.rate_wait_remaining()
+                    except Exception:
+                        wait = 0
                     if retry_i < 4:  # chi hien retry o 4 lan dau, lan cuoi bo qua
-                        self._emit({"type": "retry", "attempt": retry_i + 1})
+                        if wait > 1:
+                            self._emit({"type": "retry", "attempt": retry_i + 1, "wait": round(wait, 1)})
+                        else:
+                            self._emit({"type": "retry", "attempt": retry_i + 1})
                     if self.cancel.wait(min(2 * (retry_i + 1), 12)):
                         return "[DUNG] theo yeu cau cua nguoi dung."
                 if not reply:
                     if time.time() < deadline - 5:
+                        try:
+                            sessions.checkpoint(self.sid, step + 1, msgs,
+                                                summary=f"task={self._task_hash} llm_retry turn={turn} step={step+1}")
+                        except Exception:
+                            pass
                         time.sleep(1)
                         continue
+                    try:
+                        import experience as _exp
+                        _exp.auto_learn(user_text, self._last_steps, False,
+                                        error_msg="Groq rate limit / quota hết sau nhiều lần xoay key")
+                    except Exception:
+                        pass
                     return "[TAM DUNG] Groq dang qua tai/quota het — het thoi gian luot nay, cong viec chua xong. Go 'tiep tuc' de chay not doan con dang do."
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
@@ -315,6 +348,11 @@ class Agent:
                         content = reply.get("content") or "(rỗng)"
                     sessions.append(self.sid, {"role": "assistant", "content": content})
                     self._auto_save_skill(user_text, self._last_steps)
+                    try:
+                        import experience as _exp
+                        _exp.auto_learn(user_text, self._last_steps, True)
+                    except Exception:
+                        pass
                     return content
                 sessions.append(
                     self.sid,
@@ -355,6 +393,12 @@ class Agent:
                         try:
                             budget = max(1, int(deadline - time.time()))
                             if budget <= 0:
+                                try:
+                                    import experience as _exp
+                                    _exp.auto_learn(user_text, self._last_steps, False,
+                                                    error_msg="Hết thời gian chống treo của lượt")
+                                except Exception:
+                                    pass
                                 return "[ĐÃ DỪNG] hết thời gian chống treo của lượt này."
                             if name in ("pip_install", "ensure_tool", "task"):
                                 to = min(config.TOOL_TIMEOUT_PKG, budget)
@@ -376,6 +420,15 @@ class Agent:
                             last_tool_errors.pop(0)
                         if self._should_self_heal(result):
                             result += "\n[SELF-HEAL] Lỗi này đã xảy ra nhiều lần. Hãy thử hướng khác: đổi tool, đổi tham số, hoặc bỏ qua bước này."
+                            try:
+                                import experience as _exp
+                                _exp.record_lesson(
+                                    user_text, result[:300], "Lỗi tool lặp lại trong cùng task",
+                                    _exp.extract_lesson(user_text, result) or "Đổi hướng khi cùng 1 lỗi lặp lại.",
+                                    tags=name,
+                                )
+                            except Exception:
+                                pass
                     self._emit({"type": "tool_done", "name": name, "result": str(result)[:200]})
                     sessions.append(
                         self.sid,
