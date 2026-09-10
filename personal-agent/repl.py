@@ -225,7 +225,9 @@ class Repl:
             if self._live_kind == "thinking":
                 self._status_msg = "đang suy luận"
         elif t == "retry":
-            self._set_status("mạng bận, đang thử lại")
+            attempt = ev.get("attempt", 1)
+            if attempt <= 1 or attempt % 2 == 0:  # chi hien moi 2 lan
+                self._set_status(f"dang thu lai ({attempt}/5)...")
         elif t == "turn":
             self._set_status("tiếp tục xử lý…")
         elif t == "turn_roll":

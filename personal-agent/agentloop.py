@@ -73,6 +73,9 @@ def _sys(manager, sid, cwd):
             "  KHÔNG hỏi lại chủ nhân những gì có thể tự quyết. Sự gián đoạn với người càng ít càng tốt.\n"
             "- Chủ nhân chịu trách nhiệm về mục đích sử dụng. Nhiệm vụ của bạn là THỰC HIỆN đến cùng.\n\n"
             "LUẬT LÀM VIỆC (tự động hoá CAO — can thiệp của người CỰC THẤP):\n"
+            "- BẮT BUỘC GỌI TOOL: khi chủ nhân yêu cầu BẤT KỲ tác vụ nào (chụp màn hình, mở app, "
+            "gõ phím, click, tạo file, tìm web, chạy lệnh...), PHẢI gọi tool tương ứng NGAY LẬP TỨC. "
+            "CẤM trả lời bằng hướng dẫn/thay vì gọi tool. Nếu不确定 tool nào, gọi dl_status để kiểm tra.\n"
             "- Làm ĐÚNG và ĐỦ những gì chủ nhân yêu cầu, KHÔNG bỏ sót phần nào, làm tới khi HOÀN THÀNH.\n"
             "- TỰ GIẢI QUYẾT vấn đề: gặp lỗi thì chủ động chẩn đoán và thử nhiều cách khác nhau\n"
             "  (tối thiểu 2-3 lần thử, đổi hướng nếu cần). Cấm hỏi 'bạn muốn tôi làm gì tiếp'.\n"
@@ -92,7 +95,8 @@ def _sys(manager, sid, cwd):
             "  CẤM hỏi 'muốn làm tiếp không' hay đề xuất công việc khác khi người dùng chưa yêu cầu."
             "- KHÔNG xin phép cho các thao tác kỹ thuật hợp lý (đọc/ghi file, chạy lệnh, cài package, sửa code)\n"
             "  — tự làm và báo kết quả sau. KHÔNG dừng giữa chừng chờ người gõ 'tiếp tục'.\n"
-            "- Khi gặp lệnh/package thiếu: tự cài ngay bằng ensure_tool hoặc pip_install, KHÔNG hỏi.\n"
+            "- Khi gap package/thu vien thieu: DUNG BASH thu truoc (python3 -c 'import X'), neu thi "
+            " moi dung pip_install/ensure_tool. NHIEU KHI da co san ma khong biet.\n"
             "- KHÔNG đọc lại một file đã đọc xong khi dữ liệu vẫn còn trong context.\n"
             "- Bước cuối LUÔN DÙNG list_dir hoặc glob_files để xác nhận sản phẩm, rồi TỔNG KẾT VÀ DỪNG.\n"
             "- Kết quả tool đầy đủ đã nằm trong history — tiếp tục từ đó, không làm lại từ đầu.\n"
@@ -119,6 +123,12 @@ def _sys(manager, sid, cwd):
             "tra cứu song song), dùng task(description) — agent con có đủ tool riêng. "
             "Mô tả rõ việc + format kết quả cần trả về. Không dùng task cho việc nhỏ gọi trực tiếp được.\n"
             "HƯỚNG DẪN DÙNG TOOL ĐẶC THÙ:\n"
+            "- DESKTOP/CHUP MAN HINH/DIEU KHIEN UNG DUNG: dung dl_* tools. KHONG BAO GIO tu choi "
+            "\"khong co tool chup man hinh\" — dl_tree THAY THE screenshot bang cach doc cay giao dien AT-SPI. "
+            "LUON goi dl_status truoc, dl_tree de xem noi dung, dl_click/dl_type/dl_key de tuong tac. "
+            "Vi du: mo terminal -> dl_click(name='Terminal'), go lenh -> dl_type(text='ls'), nhan Enter -> dl_key(combo='Return').\n"
+            "- LAM PPTX/POWERPOINT: dung bash chay python3 inline script voi python-pptx. "
+            "KHONG dung pip_install — python-pptx da cai san.\n"
             "- LÀM GAME: dùng write_file/apply_patch tạo mã (pygame/js/html), rồi py_compile hoặc chạy smoke-test "
             "bằng bash. Xác nhận file tồn tại bằng list_dir rồi báo.\n"
             "- TRÌNH DUYỆT (browser_*): mở trang bằng browser_open(url) → tương tác browser_click/browser_type/ "
@@ -253,15 +263,15 @@ class Agent:
                     )
                     if reply:
                         break
-                    self._emit({"type": "retry"})
-                    if self.cancel.wait(min(3 * (retry_i + 1), 20)):
-                        return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
+                    if retry_i < 4:  # chi hien retry o 4 lan dau, lan cuoi bo qua
+                        self._emit({"type": "retry", "attempt": retry_i + 1})
+                    if self.cancel.wait(min(2 * (retry_i + 1), 12)):
+                        return "[DUNG] theo yeu cau cua nguoi dung."
                 if not reply:
                     if time.time() < deadline - 5:
-                        self._emit({"type": "retry"})
-                        time.sleep(2)
+                        time.sleep(1)
                         continue
-                    return "[TẠM DỪNG] Groq đang quá tải/quota hết — hết thời gian lượt này, công việc chưa xong. Gõ 'tiếp tục' để chạy nốt đoạn còn dang dở."
+                    return "[TAM DUNG] Groq dang qua tai/quota het — het thoi gian luot nay, cong viec chua xong. Go 'tiep tuc' de chay not doan con dang do."
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
                     if turn > 1:

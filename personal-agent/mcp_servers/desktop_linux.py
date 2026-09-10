@@ -274,34 +274,184 @@ def dl_clipboard(copy="", a=None):
     return (rr.stdout or "(rỗng)").strip()[:1000] if rr.returncode == 0 else "[LOI] đọc clipboard"
 
 
+def _obj_state(o):
+    """Lấy trạng thái phần tử: visible, focused, enabled, editable."""
+    at = _at()
+    if not at:
+        return {}
+    state = {}
+    try:
+        ss = o.getState()
+        state["visible"] = ss.contains(at.StateType.VISIBLE)
+        state["focused"] = ss.contains(at.StateType.FOCUSED)
+        state["enabled"] = ss.contains(at.StateType.ENABLED)
+        state["editable"] = ss.contains(at.StateType.EDITABLE)
+        state["selected"] = ss.contains(at.StateType.SELECTED)
+    except Exception:
+        pass
+    return state
+
+
+def _obj_bounds(o):
+    """Lấy tọa độ + kích thước phần tử."""
+    at = _at()
+    if not at:
+        return None
+    try:
+        x, y, w, h = o.getExtents(at.DESKTOP_COORDS)
+        return {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+    except Exception:
+        return None
+
+
+def dl_find(query, app="", a=None):
+    """Tìm phần tử theo ngôn ngữ tự nhiên: 'nút save', 'ô tìm kiếm', 'menu File'.
+    Trả về danh sách ref at<id> kèm tên, role, trạng thái."""
+    desk = _desktop()
+    if desk is None:
+        return "[LOI] không truy cập được AT-SPI"
+    with _lock:
+        _snap["map"] = {}
+    q = query.lower().strip()
+    results = []
+
+    def _search(o, depth):
+        if len(results) >= 20 or depth > 10:
+            return
+        role = _obj_role(o)
+        name = _obj_name(o)
+        role_lower = role.lower()
+        name_lower = name.lower()
+        matched = False
+        # Match theo tên
+        if q in name_lower:
+            matched = True
+        # Match theo role (hỗ trợ tên tiếng Việt)
+        role_aliases = {
+            "nút": ["button", "push button", "toggle button"],
+            "button": ["button", "push button"],
+            "textbox": ["text", "textbox", "entry"],
+            "ô nhập": ["text", "textbox", "entry"],
+            "ô nhập liệu": ["text", "textbox", "entry"],
+            "menu": ["menu", "menu item", "menu bar"],
+            "tab": ["tab", "page tab"],
+            "checkbox": ["checkbox", "check box"],
+            "ô ticks": ["checkbox", "check box"],
+            "link": ["link"],
+            "combo": ["combo box", "combobox"],
+            "dropdown": ["combo box", "combobox"],
+        }
+        for alias, roles in role_aliases.items():
+            if alias in q and role_lower in roles:
+                matched = True
+                break
+        if matched:
+            n = len(results)
+            ref = f"at{n}"
+            state = _obj_state(o)
+            bounds = _obj_bounds(o)
+            state_str = ", ".join(f"{k}={v}" for k, v in state.items() if v is not None)
+            bounds_str = f"at ({bounds['x']},{bounds['y']}) {bounds['w']}x{bounds['h']}" if bounds else ""
+            _snap["map"][ref] = {"obj": o, "role": role, "name": name}
+            results.append(f"[{ref}] {role} '{name}' — {state_str} {bounds_str}")
+        try:
+            for ch in o:
+                _search(ch, depth + 1)
+        except Exception:
+            pass
+
+    try:
+        for appobj in desk:
+            if app and _obj_name(appobj).lower() != app.lower():
+                continue
+            _search(appobj, 0)
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+    if not results:
+        return f"Không tìm thấy phần tử nào khớp '{query}'. Thử dl_tree để xem toàn bộ."
+    header = f"Tìm thấy {len(results)} phần tử cho '{query}':"
+    return header + "\n" + "\n".join(results) + "\nDùng ref at<id> cho dl_click."
+
+
+def dl_text(app="", a=None):
+    """Đọc toàn bộ text hiển thị trên desktop / 1 app (thay cho screenshot OCR)."""
+    desk = _desktop()
+    if desk is None:
+        return "[LOI] không truy cập được AT-SPI"
+    texts = []
+
+    def _collect(o, depth):
+        if len(texts) > 500:
+            return
+        role = _obj_role(o)
+        name = _obj_name(o)
+        if name and role.lower() not in ("application", "frame", "filler", "separator", "panel"):
+            texts.append(name)
+        try:
+            # Thử đọc text nội dung (document, terminal, editor)
+            iface = o.queryInterface("Text")
+            if iface:
+                t = iface.getText(0, min(iface.getCharacterCount(), 2000))
+                if t and t.strip() and t.strip() != name:
+                    texts.append(f"  [{role}] {t.strip()[:500]}")
+        except Exception:
+            pass
+        try:
+            for ch in o:
+                _collect(ch, depth + 1)
+        except Exception:
+            pass
+
+    try:
+        for appobj in desk:
+            if app and _obj_name(appobj).lower() != app.lower():
+                continue
+            _collect(appobj, 0)
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+    if not texts:
+        return "(không có text nào)"
+    return "\n".join(texts[:300])
+
+
 TOOLS = [
-    Tool("dl_status", "Kiểm tra môi trường điều khiển desktop (pyatspi/xdotool) còn thiếu gì.",
+    Tool("dl_status", "KIỂM TRA desktop: xem pyatspi/xdotool có sẵn không. LUÔN gọi đầu tiên.",
          schema({}), dl_status),
-    Tool("dl_apps", "Liệt kê các ứng dụng desktop đang mở cây accessibility (AT-SPI).",
+    Tool("dl_apps", "LIỆT KÊ app đang mở trên desktop (thay cho screenshot — đọc AT-SPI tree).",
          schema({}), dl_apps),
-    Tool("dl_tree", "Xuất cây giao diện (AT-SPI) của app — KHÔNG cần screenshot. Trả phần tử tương tác kèm ref at<id> để click/type. Trước khi tương tác luôn snapshot (gọi dl_tree) lại lần cuối.",
+    Tool("dl_tree", "NHÌN desktop: xuất toàn bộ giao diện dạng text (KHÔNG cần screenshot/OCR). "
+         "Trả cây AT-SPI với ref at<id> để click/type. Đây là CÔNG CỤ CHÍNH để xem nội dung màn hình.",
          schema({"app": {"type": "string", "description": "tên app cần lọc (rỗng = app đang focus)", "default": ""},
                  "max_depth": {"type": "integer", "default": 6},
                  "limit": {"type": "integer", "default": 300}}),
          dl_tree),
-    Tool("dl_click", "Click phần tử theo ref at<id> (từ dl_tree) HOẶC theo name/role; ưu tiên action AT-SPI, fallback xdotool.",
+    Tool("dl_find", "TÌM PHẦN TỬ theo ngôn ngữ tự nhiên: 'nút save', 'ô tìm kiếm', 'menu File'. "
+         "Trả ref at<id> kèm tên, role, trạng thái. Không cần biết chính xác tên app.",
+         schema({"query": {"type": "string", "description": "mô tả cần tìm (tiếng Việt hoặc Anh)"},
+                 "app": {"type": "string", "description": "lọc theo app (rỗng = tìm tất cả)", "default": ""}}),
+         dl_find),
+    Tool("dl_text", "ĐỌC TEXT hiển thị trên desktop / 1 app (thay cho screenshot OCR). "
+         "Trả toàn bộ text đang thấy trên màn hình.",
+         schema({"app": {"type": "string", "description": "lọc theo app (rỗng = tất cả)", "default": ""}}),
+         dl_text),
+    Tool("dl_click", "CLICK phần tử trên desktop: theo ref at<id> (từ dl_tree/dl_find) HOẶC theo name/role.",
          schema({"ref": {"type": "string", "default": ""},
                  "name": {"type": "string", "default": ""},
                  "role": {"type": "string", "default": "button"}}),
          dl_click),
-    Tool("dl_type", "Gõ text vào phần tử đang focus (xdotool).",
+    Tool("dl_type", "GÕ TEXT vào phần tử đang focus trên desktop.",
          schema({"text": {"type": "string"},
                  "clear": {"type": "boolean", "default": False}}),
          dl_type),
-    Tool("dl_key", "Nhấn tổ hợp phím, vd 'ctrl+s', 'Return', 'alt+Tab'.",
+    Tool("dl_key", "NHẤN PHÍM: tổ hợp phím như 'ctrl+c', 'Return', 'alt+Tab'.",
          schema({"combo": {"type": "string"}}),
          dl_key),
-    Tool("dl_mouse", "Điều khiển chuột theo tọa độ: click/right/double/move/kéo-thả.",
+    Tool("dl_mouse", "ĐIỀU KHIỂN CHUỘT theo tọa độ: click/right/double/move/drag.",
          schema({"x": {"type": "integer"}, "y": {"type": "integer"},
                  "action": {"type": "string", "default": "click"},
                  "drag_to": {"type": "string", "default": ""}}),
          dl_mouse),
-    Tool("dl_clipboard", "Đọc nội dung clipboard (cần xclip/xsel).",
+    Tool("dl_clipboard", "ĐỌC/GHI clipboard (cần xclip/xsel).",
          schema({"copy": {"type": "string", "default": ""}}),
          dl_clipboard),
 ]

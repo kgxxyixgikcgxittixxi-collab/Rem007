@@ -558,7 +558,7 @@ def chat(msgs, tools=None, budget=None):
         if time.time() >= end:
             return None
         all_rate = True
-        for m in chain[:4]:
+        for m in chain[:5]:
             if time.time() >= end:
                 break
             r = _post(body, m, budget=max(1, end - time.time()))
@@ -568,9 +568,8 @@ def chat(msgs, tools=None, budget=None):
             if r is not None:
                 return r.json()["choices"][0]["message"]
             all_rate = False
-# hết model nào còn dùng được tạm → backoff ngắn rồi thử lại tới hết budget
         if all_rate:
-            wait = min(2 + attempt * 2, 8)
+            wait = min(1 + attempt, 4)
             time.sleep(max(0.0, min(wait, end - time.time())))
             continue
         return None
@@ -697,7 +696,7 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None):
         if time.time() >= end:
             return None
         all_rate = True
-        for m in chain[:4]:
+        for m in chain[:5]:  # thu toi da 5 model
             if time.time() >= end:
                 break
             r = _post(body, m, budget=max(1, end - time.time()), timeout=70)
@@ -709,7 +708,7 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None):
             all_rate = False
             return _iter_stream(r, on_delta)
         if all_rate:
-            wait = min(2 + attempt * 2, 8)
+            wait = min(1 + attempt, 4)  # giam backoff: 1s, 2s, 3s
             time.sleep(max(0.0, min(wait, end - time.time())))
             continue
     return None
