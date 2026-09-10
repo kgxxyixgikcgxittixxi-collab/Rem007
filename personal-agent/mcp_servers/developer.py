@@ -216,14 +216,43 @@ def bash(command, timeout=SHELL_TIMEOUT):
     for d in DANGER:
         if d in low:
             return f"[TU CHOI] lệnh nguy hiểm bị chặn: {d}"
+    # Chạy qua FILE thay vì pipe: subprocess.run với capture_output=True sẽ HANG mãi
+    # khi lệnh spawn tiến trình nền (`cmd &`) — tiến trình con giữ pipe stdout mở nên
+    # run() chờ EOF không bao giờ tới. redirect ra file thì shell thoát là run() trả về
+    # ngay, tiến trình nền tiếp tục ghi file không sao.
+    import tempfile
+    with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".out", delete=False) as fo, \
+         tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".err", delete=False) as fe:
+        out_path, err_path = fo.name, fe.name
+        fo.write(""); fe.write("")
     try:
-        r = subprocess.run(["bash", "-c", command], cwd=CWD[0],
-                           capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return f"[LOI] timeout quá {timeout}s"
-    out = r.stdout
-    if r.stderr:
-        out += "\n[STDERR]\n" + r.stderr
+        with open(out_path, "w") as fo, open(err_path, "w") as fe:
+            try:
+                r = subprocess.run(["bash", "-c", command], cwd=CWD[0],
+                                   stdin=subprocess.DEVNULL,
+                                   stdout=fo, stderr=fe, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+            else:
+                code = r.returncode
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+    try:
+        with open(out_path, "r", encoding="utf-8", errors="replace") as fo:
+            out = fo.read()
+        with open(err_path, "r", encoding="utf-8", errors="replace") as fe:
+            err = fe.read()
+    finally:
+        for p in (out_path, err_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+    if code == "timeout":
+        tail = (out + "\n[STDERR]\n" + err)[-MAX_TOOL_OUT:] if (out or err) else ""
+        return f"[LOI] timeout quá {timeout}s — lệnh nền giữ màn hình không thoát?\n{tail}".strip()
+    if err:
+        out += "\n[STDERR]\n" + err
     return clamp(out.strip() or "(không có output)", MAX_TOOL_OUT)
 
 
