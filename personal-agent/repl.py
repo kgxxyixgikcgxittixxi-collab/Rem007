@@ -104,21 +104,7 @@ def _klines(logo, colors):
 
 def _logo_banner():
     logo = _klines(config.LOGO, ["rd", "ye", "gr", "cy", "mg", "bl"])
-    meta = (C["bold"] + C["bl"] + config.NAME + C["reset"] + "  v" + config.VERSION +
-            C["dim"] + "  ·  MCP-native  ·  Groq  ·  opencode-style" + C["reset"])
-    line = C["reset"] + C["dim"] + ("─" * 48) + C["reset"]
-    m = "?"
-    c = "?"
-    try:
-        cm = groq.chat_models()
-        m = cm[0] if cm else "?"
-        cc = groq.clone_models()
-        c = cc[0] if cc else "?"
-    except Exception:
-        pass
-    return ("\n" + logo + "\n" + line + "\n" + meta + "\n" + line + "\n" +
-            C["dim"] + "  Model: " + C["reset"] + C["gr"] + m + C["reset"] +
-            C["dim"] + "   Compact: " + C["reset"] + C["gr"] + c + C["reset"] + "\n")
+    return logo
 
 
 def _tool_title(ev):
@@ -214,14 +200,15 @@ class Repl:
         elif t == "tool_done":
             r = (ev.get("result") or "")
             ok = not r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]"))
-            row = ("✓ " if ok else "✗ ") + self._cur_title
+            label = _TOOL_LABEL.get(self._cur_title.split("  —  ")[0] if "  —  " in self._cur_title else self._cur_title, self._cur_title)
+            row = ("  ✓ " if ok else "  ✗ ") + C["gr" if ok else "rd"] + label + C["reset"] + C["dim"] + " done" + C["reset"]
             self._tool_rows.append((row, not ok))
-            if len(self._tool_rows) > 14:      # giữ tối đa, không spam màn hình
+            if len(self._tool_rows) > 14:
                 self._tool_rows.pop(0)
-            # In NGAY (timeline LIVE như opencode) — người dùng thấy tiến độ liên tục,
-            # không phải đợi hết lượt mới hiện một loạt dòng.
-            _p("\r  " + row, "rd" if not ok else "dim")
-        elif t in ("thinking", "llm"):
+            _p("\r" + row, "gr" if ok else "rd")
+        elif t == "thinking":
+            self._set_status("đang suy luận")
+        elif t == "llm":
             self._set_status("đang suy luận")
         elif t == "stream_delta":
             self._live_kind = ev.get("kind", "content")
@@ -230,8 +217,8 @@ class Repl:
                 self._status_msg = "đang suy luận"
         elif t == "retry":
             attempt = ev.get("attempt", 1)
-            if attempt <= 1 or attempt % 2 == 0:  # chi hien moi 2 lan
-                self._set_status(f"dang thu lai ({attempt}/5)...")
+            if attempt <= 1 or attempt % 2 == 0:
+                self._set_status(f"thử lại ({attempt}/5)...")
         elif t == "turn":
             self._set_status("tiếp tục xử lý…")
         elif t == "turn_roll":
@@ -375,17 +362,17 @@ class Repl:
                 self._clear_spin_line()   # rồi mới in tránh bị đè "Rem>"
                 # timeline tool ĐÃ in live khi từng tool xong ở _on_ev — không in lại nữa
                 if out:
-                    # Render kiểu opencode: suy luận CUỘN GỌN 1 dòng mờ + nội dung markdown
-                    # rõ nét, chỉ tiền tố Rem> màu xanh biển, chữ vẫn trắng.
                     sys.stdout.write(P_AGENT)
                     sys.stdout.flush()
                     think, body = render.split_thinking(out)
                     self._last_think = think
+                    # Opencode-style thinking block
                     if think.strip():
-                        # combine thinking + body ONCE: show collapsed thinking header
                         _type(render.thinking_to_ansi(think, full=False), None)
-                    _type(render.md_to_ansi(body), None)
-                    # Trả lời xong → giữ con trỏ NGAY tại "Rem> " (không xuống dòng) để gõ tiếp
+                    # Body — render markdown sạch (opencode-style)
+                    if body.strip():
+                        _type(render.md_to_ansi(body), None)
+                    # Đáp án xong → giữ con trỏ NGAY tại "Rem> " (không xuống dòng)
                     sys.stdout.write(C["ob"] + "Rem>" + C["reset"] + " ")
                     sys.stdout.flush()
                 self._pending = 0
@@ -412,15 +399,9 @@ class Repl:
             print(_logo_banner())
         except Exception:
             pass
-        print()
-        _p("Extensions (MCP)", "mg")
-        print(self.manager.status())
-        _p(f"\nTools ({len(self.manager.tool_names())})", "bold")
-        print("  " + ", ".join(self.manager.tool_names()))
-        st = f"\nSession: {self.sid} | preset: {self.presets} | auto: {self.agent_auto()}"
-        if self._busy or self._pending:
-            st += f" | 🌀 đang chạy | {self._pending} câu đang chờ"
-        _p(st, "dim")
+        _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
+        if not groq.keys():
+            _p(f"⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
 
     def agent_auto(self):
         try:
@@ -675,12 +656,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         return True
 
     def _prompt_hint(self):
-        # Prompt là chỗ NGƯỜI DÙNG gõ → màu xanh lá chuối, tiền tố User>
+        # Opencode-style prompt: bold blue "Rem>" with subtle indicator
         if self._busy:
-            return "⏳(câu mới sẽ chờ lượt) " + P_USER
+            return C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["ob"] + " Rem> " + C["reset"] + " "
         if self._pending:
-            return f"⏳({self._pending} chờ) " + P_USER
-        return P_USER
+            return C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["ob"] + " Rem> " + C["reset"] + " "
+        return C["bold"] + C["ob"] + " Rem> " + C["reset"] + " "
 
     def run(self):
         self._clear()
@@ -691,12 +672,11 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 print(_logo_banner())
             except Exception:
                 pass
-            _p(f"Gõ /help | /status | /stop | /clear | /exit", "dim")
+            _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
             _p(f"Đang khởi chạy extensions...", "dim")
         self.manager.start_all()
         threading.Thread(target=self._worker, daemon=True).start()
         if self.headless is not None:
-            # headless: chạy ĐÚNG 1 task, tự động tiếp nối nếu bị cắt, rồi thoát (exit=0 nếu xong)
             self.q.put(("task", self.headless))
             while not self._busy:
                 time.sleep(0.1)
@@ -726,9 +706,9 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     self.q.put(("quit", None))
                     break
                 continue
-            # Tô lại dòng người gõ: CHỈ tiền tố "User>" màu xanh lá, nội dung để trắng (giống Rem>)
+            # Opencode-style: highlight user input, show as "User" block
             sys.stdout.write("\033[1A\r\033[2K")
-            sys.stdout.write(C["lm"] + "User> " + C["reset"] + line + "\n")
+            sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + line + C["reset"] + "\n")
             sys.stdout.flush()
             if self._busy:
                 self._pending += 1
