@@ -8,6 +8,7 @@ SPECS = [
     {"name": "developer", "module": "developer", "desc": "file + shell + thư mục"},
     {"name": "webtool", "module": "webtool", "desc": "tìm web, đọc web, GitHub API"},
     {"name": "memory", "module": "memory_server", "desc": "bộ nhớ dài hạn graph.json"},
+    {"name": "skills", "module": "skills_server", "desc": "skill tự học — lưu & tái dùng quy trình thành công"},
     {"name": "lsp", "module": "lsp_server", "desc": "LSP: clangd/pylsp (diagnostics, định nghĩa, tham chiếu, symbol, hover)"},
     {"name": "desktop_linux", "module": "desktop_linux", "desc": "điều khiển desktop Linux qua AT-SPI (cây UI, click, gõ phím, chuột, clipboard)"},
     {"name": "browser_auto", "module": "browser_auto", "desc": "trình duyệt bằng Playwright: điều khiển web, YouTube, dashboard, screenshot"},

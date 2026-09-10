@@ -1,4 +1,4 @@
-import json, os, time, threading, hashlib
+import json, os, sys, time, threading, hashlib, re
 
 import config
 import sessions
@@ -17,6 +17,19 @@ def _budget(deadline, step_deadline=None):
     if step_deadline:
         return min(_STEP_BUDGET, max(15, int(step_deadline - time.time())))
     return min(_CALL_BUDGET, max(15, int(deadline - time.time())))
+
+
+def _load_skills_prompt():
+    """Load các skill đã học vào system prompt (tự tiến hoá kiểu GenericAgent)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from mcp_servers.skills_server import skill_list as _sk_list
+        listing = _sk_list()
+        if not listing or listing.startswith("(chưa"):
+            return ""
+        return "\n\n" + listing
+    except Exception:
+        return ""
 
 
 def _load_agents_md(cwd):
@@ -54,6 +67,7 @@ def _sys(manager, sid, cwd):
     )
     agents_md = _load_agents_md(cwd)
     agents_section = f"\n\nHƯỚNG DẪN DỰ ÁN (từ AGENTS.md):\n{agents_md}" if agents_md else ""
+    skills_section = _load_skills_prompt()
     return {
         "role": "system",
         "content": (
@@ -147,6 +161,7 @@ def _sys(manager, sid, cwd):
             "- KEY GROQ: nhiều key xoay vòng tự động với circuit breaker — khi Groq trả 429 liên tục agent tự "
             "cooldown và chuyển key khác; nếu hết key thì báo lỗi rõ, đừng tự thử lại mãi.\n"
             f"{agents_section}"
+            f"{skills_section}"
         ),
     }
 
@@ -162,6 +177,7 @@ class Agent:
         self._error_patterns = {}  # pattern -> count (self-healing: track recurring errors)
         self._tool_fingerprints = set()  # track which tools have been called with what args
         self._task_hash = ""  # fingerprint of current task for resume
+        self._last_steps = []  # (tool, args) đã dùng cho task hiện tại (để auto-save skill)
 
     def _emit(self, ev):
         if self.on_event:
@@ -193,6 +209,24 @@ class Agent:
         if pattern:
             self._error_patterns[pattern] = self._error_patterns.get(pattern, 0) + 1
 
+    def _auto_save_skill(self, user_text, steps):
+        """Tự lưu skill khi task thành công (tự tiến hoá kiểu GenericAgent)."""
+        if not steps or len(steps) < 2:
+            return
+        # Bỏ các bước thất bại (result_ok=False) — chỉ học bước thành công
+        good = [s for s in steps if s.get("result_ok")]
+        if len(good) < 2:
+            return
+        # Tên skill rút ra từ câu lệnh
+        words = re.sub(r"[^\w\sà-ỹÀ-Ỹ]", " ", user_text.lower()).split()
+        words = [w for w in words if len(w) > 2 and w not in ("bang", "cua", "voi", "cho", "trong", "qua", "dung", "luu", "tao", "va", "mot", "kien", "trao", "sau", "khi", "xong", "them")][:5]
+        name = "_".join(words) or "skill_tu_hoc"
+        try:
+            from mcp_servers.skills_server import skill_save
+            skill_save(name, user_text[:200], good, tags="auto")
+        except Exception:
+            pass
+
     def _should_self_heal(self, error_msg):
         """Check if we've seen this error before and should try alternative approach."""
         pattern = (error_msg or "")[:80]
@@ -222,6 +256,7 @@ class Agent:
         self.cancel.clear()
         self._error_patterns.clear()
         self._tool_fingerprints.clear()
+        self._last_steps = []
         self._task_hash = hashlib.md5(user_text.encode()).hexdigest()[:16]
         sessions.append(self.sid, {"role": "user", "content": user_text})
         deadline = time.time() + config.MAX_TASK_SECONDS
@@ -279,6 +314,7 @@ class Agent:
                     else:
                         content = reply.get("content") or "(rỗng)"
                     sessions.append(self.sid, {"role": "assistant", "content": content})
+                    self._auto_save_skill(user_text, self._last_steps)
                     return content
                 sessions.append(
                     self.sid,
@@ -328,6 +364,11 @@ class Agent:
                         except Exception as e:
                             result = f"[LOI CHAY TOOL] {type(e).__name__}: {e}"
                     # SELF-HEALING: track errors and inject recovery hints
+                    self._last_steps.append({
+                        "tool": name,
+                        "args": args,
+                        "result_ok": not (result and (result.startswith("[LOI]") or result.startswith("[TOOL LOI]") or result.startswith("[TU CHOI]"))),
+                    })
                     if result and (result.startswith("[LOI]") or result.startswith("[TOOL LOI]")):
                         self._track_error(result)
                         last_tool_errors.append((name, result[:200]))
