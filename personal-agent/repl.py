@@ -20,7 +20,7 @@ C = {
 }
 # Prefix phân biệt rõ người dùng vs agent
 P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối (chỉ tiền tố, nội dung để trắng)
-P_AGENT = "\033[34mRem>\033[0m "       # xanh biển
+P_AGENT = "\033[1m\033[96m❯\033[0m "       # kiểu opencode: dấu ❯ nổi bật
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
 # Số lần TỰ ĐỘNG chạy tiếp tối đa khi 1 lượt bị cắt giữa chừng (hết giờ/quota/bước)
@@ -182,6 +182,7 @@ class Repl:
         self._live_n = 0          # số ký tự model đang soạn (stream) — hiện tiến độ
         self._live_kind = ""      # "content" | "thinking"
         self._last_think = ""     # khối suy luận gần nhất (để /think xem đầy đủ)
+        self._tool_t0 = 0.0       # mốc bắt đầu tool hiện tại (hiện số giây kiểu opencode)
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -199,12 +200,14 @@ class Repl:
         t = ev.get("type")
         if t == "tool_start":
             self._cur_title = _tool_title(ev)
+            self._tool_t0 = time.time()
             self._set_status(self._cur_title)
         elif t == "tool_done":
             r = (ev.get("result") or "")
             ok = not r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]"))
+            dt = time.time() - (self._tool_t0 or time.time())
             label = _TOOL_LABEL.get(self._cur_title.split("  —  ")[0] if "  —  " in self._cur_title else self._cur_title, self._cur_title)
-            row = ("  ✓ " if ok else "  ✗ ") + C["gr" if ok else "rd"] + label + C["reset"] + C["dim"] + " done" + C["reset"]
+            row = ("  ✓ " if ok else "  ✗ ") + C["gr" if ok else "rd"] + label + C["reset"] + C["dim"] + f" done · {dt:.1f}s" + C["reset"]
             self._tool_rows.append((row, not ok))
             if len(self._tool_rows) > 14:
                 self._tool_rows.pop(0)
@@ -375,8 +378,9 @@ class Repl:
                     # Body — render markdown sạch (opencode-style)
                     if body.strip():
                         _type(render.md_to_ansi(body), None)
-                    # Đáp án xong → giữ con trỏ NGAY tại "Rem> " (không xuống dòng)
-                    sys.stdout.write(C["ob"] + "Rem>" + C["reset"] + " ")
+                    # Đáp án xong → gợi ý phím tắt kiểu opencode, giữ con trỏ tại ❯
+                    self._footer_hints()
+                    sys.stdout.write(C["bold"] + C["cy"] + "❯ " + C["reset"])
                     sys.stdout.flush()
                 self._pending = 0
 
@@ -658,13 +662,42 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p("Không rõ lệnh. Gõ /help.", "dim")
         return True
 
+    def _header_box(self):
+        """Hộp thông tin đầu phiên kiểu opencode: viền bo tròn + session/model/cwd/keys."""
+        tw = render.term_width()
+        w = min(max(tw - 6, 44), 78)
+        try:
+            ms = groq.chat_models()
+            model = ms[0] if ms else "chưa có key"
+        except Exception:
+            model = "?"
+        try:
+            nkeys = len(groq.keys())
+        except Exception:
+            nkeys = 0
+        title = f" REM v{config.VERSION} "
+        rows = [
+            f"model  {model}",
+            f"dir    {os.getcwd()}",
+            f"chat   {self.sid} · {nkeys} keys",
+        ]
+        print(C["dim"] + "╭" + title + "─" * max(0, w - render.disp_len(title) - 2) + "╮" + C["reset"])
+        for r in rows:
+            pad = max(0, w - 4 - render.disp_len(r))
+            print(C["dim"] + "│" + C["reset"] + " " + r + " " * pad + " " + C["dim"] + "│" + C["reset"])
+        bot = "╰" + "─" * (w - 2) + "╯"
+        print(C["dim"] + bot + C["reset"])
+
+    def _footer_hints(self):
+        _p("/new chat mới · /sessions xem cũ · /stop dừng · /exit thoát", "dim")
+
     def _prompt_hint(self):
-        # Opencode-style prompt: bold blue "Rem>" with subtle indicator
+        # Opencode-style prompt: dấu ❯ nổi bật
         if self._busy:
-            return C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["ob"] + " Rem> " + C["reset"] + " "
+            return C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
         if self._pending:
-            return C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["ob"] + " Rem> " + C["reset"] + " "
-        return C["bold"] + C["ob"] + " Rem> " + C["reset"] + " "
+            return C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
+        return C["bold"] + C["cy"] + "❯ " + C["reset"]
 
     def run(self):
         self._clear()
@@ -677,8 +710,17 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 pass
             _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
             _p(f"Đoạn chat mới: {self.sid} (lịch sử trống — không dính chuyện cũ)", "gr")
+            try:
+                self._header_box()
+            except Exception:
+                pass
             _p("Gõ /sessions để xem lại đoạn cũ | /new để mở đoạn mới", "dim")
             _p(f"Đang khởi chạy extensions...", "dim")
+        else:
+            try:
+                self._header_box()
+            except Exception:
+                pass
         self.manager.start_all()
         threading.Thread(target=self._worker, daemon=True).start()
         if self.headless is not None:
