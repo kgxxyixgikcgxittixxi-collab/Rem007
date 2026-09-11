@@ -75,6 +75,35 @@ def _char_len(m):
     return sum(len(x or "") for x in m.values() if isinstance(x, (str, bytes)))
 
 
+def _fix_pairs(msgs):
+    """Bảo đảm cặp assistant.tool_calls ↔ tool message khớp nhau.
+    Groq/OpenAI trả 400 nếu assistant còn tool_calls mồ côi (tool message đã bị
+    trim/compact cắt mất) — lỗi này deterministic nhưng agent lại đốt hết key
+    để retry vô ích. Hàm này cắt tool_calls thừa + bỏ tool message lạc."""
+    ids_tool = {m.get("tool_call_id") for m in msgs
+                if m.get("role") == "tool" and m.get("tool_call_id")}
+    out = []
+    for m in msgs:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            kept = [tc for tc in m["tool_calls"] if tc.get("id") in ids_tool]
+            if len(kept) != len(m["tool_calls"]):
+                m = dict(m)
+                if kept:
+                    m["tool_calls"] = kept
+                else:
+                    m.pop("tool_calls", None)
+                    if not (m.get("content") or "").strip():
+                        continue
+        out.append(m)
+    ref = set()
+    for m in out:
+        if m.get("role") == "assistant":
+            for tc in m.get("tool_calls") or []:
+                ref.add(tc.get("id"))
+    return [m for m in out
+            if m.get("role") != "tool" or (m.get("tool_call_id") in ref)]
+
+
 def trim(msgs, total=CTX_TOTAL, cap=CTX_CAP):
     """Giữ context gọn trước khi gọi LLM. Giới hạn cứng: tổng ký tự.
     Xóa dứt điểm các tool result cũ nhất (giữ system + cuối) khi vượt ngưỡng,
@@ -113,7 +142,7 @@ def trim(msgs, total=CTX_TOTAL, cap=CTX_CAP):
                 break
         else:
             break
-    return msgs
+    return _fix_pairs(msgs)
 
 
 def compact(sid, msgs, budget=SUM_BUDGET, msg_cap=SUM_AT, llm_budget=None):
@@ -145,7 +174,7 @@ def compact(sid, msgs, budget=SUM_BUDGET, msg_cap=SUM_AT, llm_budget=None):
     )
     summary = groq.text(prompt, max_tokens=600, budget=llm_budget)
     if summary:
-        return sys_msg + [{"role": "user", "content": f"[TÓM TẮT NGỮ CẢNH]\n{summary}"}] + keep
+        return _fix_pairs(sys_msg + [{"role": "user", "content": f"[TÓM TẮT NGỮ CẢNH]\n{summary}"}] + keep)
     # tóm tắt fail → fallback cứng để đảm bảo không tràn
     return trim(sys_msg + keep)
 
@@ -155,9 +184,11 @@ def checkpoint(sid, step, msgs, summary=""):
     try:
         path = os.path.join(CKPT, f"{sid}.cp.json")
         data = {"sid": sid, "step": step, "ts": time.time(), "summary": summary}
-        # lưu 1 bản tóm tắt ngắn gọn tiến độ thực tế
-        with open(path, "w", encoding="utf-8") as f:
+        # lưu 1 bản tóm tắt ngắn gọn tiến độ thực tế (ghi atomic chống rách file)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
         return path
     except Exception:
         return None
