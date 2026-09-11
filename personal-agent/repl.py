@@ -63,6 +63,21 @@ _TOOL_LABEL = {
 }
 
 
+# Menu chọn số kiểu opencode (/list): mỗi mục là 1 chế độ/danh mục công việc.
+# Mục 2 = ghi thao tác desktop (macro recorder): ấn 2 → agent vào chế độ ghi.
+MENU = [
+    ("1", "Chat tự do", "hỏi đáp, code, mọi việc như bình thường"),
+    ("2", "Ghi thao tác", "ghi lại thao tác desktop thành macro để phát lại"),
+    ("3", "Phát lại macro", "chọn macro đã ghi để AI làm lại"),
+    ("4", "Xem macro", "liệt kê macro đã lưu, phân mục theo công việc"),
+    ("5", "Web & tin tức", "tìm kiếm web, đọc trang, tin mới"),
+    ("6", "Video / ảnh / giọng nói", "làm video, ảnh AI, TTS tiếng Việt"),
+    ("7", "Trạng thái", "xem extension, keys, session"),
+]
+MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
+                       "mang-xa-hoi", "khac")
+
+
 def _p(s, col="cy", end="\n"):
     print(C.get(col, "") + str(s) + C["reset"], end=end, flush=True)
 
@@ -190,6 +205,7 @@ class Repl:
         self._live_kind = ""      # "content" | "thinking"
         self._last_think = ""     # khối suy luận gần nhất (để /think xem đầy đủ)
         self._tool_t0 = 0.0       # mốc bắt đầu tool hiện tại (hiện số giây kiểu opencode)
+        self.rec_mode = ""        # tên macro đang ghi (chế độ ghi từ menu /list 2), "" = chat thường
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -506,6 +522,79 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         except Exception as e:
             _p(f"[LOI] không ghi AGENTS.md: {e}", "rd")
 
+    def _send(self, text):
+        """Gửi câu lệnh vào hàng đợi agent (hiện khối User như khi gõ tay)."""
+        sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + text + C["reset"] + "\n")
+        sys.stdout.flush()
+        if self._busy:
+            self._pending += 1
+            _p(f"⏳ Câu hỏi đã xếp hàng (#{self._pending}).", "ye")
+        self.q.put(("task", text))
+
+    # ── Menu chọn số (/list) ──────────────────────────────────────────────
+    def _menu(self):
+        _p("— DANH MỤC (gõ số để chọn) —", "bold")
+        for num, name, desc in MENU:
+            mark = " ⏺" if num == "2" and self.rec_mode else ""
+            _p(f"  {num}. {name}{mark} — {desc}", "cy")
+
+    def _macro_cats(self):
+        try:
+            from mcp_servers.desktop_linux import MACRO_CATS
+            return tuple(MACRO_CATS) or MACRO_CATS_FALLBACK
+        except Exception:
+            return MACRO_CATS_FALLBACK
+
+    def _menu_pick(self, num):
+        if num == "1":
+            self.rec_mode = ""
+            _p("Đã về chế độ chat tự do.", "gr")
+        elif num == "2":
+            # VÀO CHẾ ĐỘ GHI thao tác: hỏi tên + mục rồi rec_start qua agent
+            if self._busy:
+                _p("Agent đang bận — đợi hết lượt rồi ấn 2 lại.", "ye")
+                return
+            try:
+                nm = input("  Tên macro (Enter = tự đặt): ").strip()
+            except Exception:
+                return
+            if not nm:
+                nm = "macro-" + time.strftime("%H%M%S")
+            cats = self._macro_cats()
+            try:
+                cat = input(f"  Mục {','.join(cats)} (Enter = khac): ").strip().lower() or "khac"
+            except Exception:
+                return
+            if cat not in cats:
+                _p(f"Mục lạ — dùng 'khac'. Hợp lệ: {','.join(cats)}", "ye")
+                cat = "khac"
+            self.rec_mode = re.sub(r"\s+", "_", nm)[:60]
+            _p(f"⏺ VÀO CHẾ ĐỘ GHI macro '{self.rec_mode}' (mục {cat}).", "rd")
+            _p("  Ra lệnh thao tác desktop như bình thường — xong gõ /done để dừng & lưu.", "dim")
+            self._send(f"Dùng rec_start để bắt đầu ghi macro tên '{self.rec_mode}' mục '{cat}'")
+        elif num == "3":
+            if self._busy:
+                _p("Agent đang bận — đợi hết lượt rồi ấn 3 lại.", "ye")
+                return
+            try:
+                nm = input("  Tên macro cần phát (gõ 4 để xem danh sách trước): ").strip()
+            except Exception:
+                return
+            if not nm:
+                return
+            self._send(f"Dùng rec_play để phát lại macro tên '{nm}' (tốc độ mặc định), rồi xác nhận kết quả")
+        elif num == "4":
+            self._send("Dùng rec_list để liệt kê macro đã lưu theo mục công việc")
+        elif num == "5":
+            _p("Gõ câu hỏi web trực tiếp, vd: tin công nghệ mới nhất hôm nay", "dim")
+        elif num == "6":
+            _p("Gõ yêu cầu media trực tiếp, vd: làm video shorts về mèo", "dim")
+        elif num == "7":
+            self._status()
+            self._sessions()
+        else:
+            _p(f"Không có mục {num}. Gõ /list để xem.", "dim")
+
     def slash(self, line):
         cmd = line.strip()
         parts = cmd.split()
@@ -513,6 +602,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p(
                 "\n".join([
                     "/help    trợ giúp",
+                    "/list    danh mục chọn số (2 = ghi thao tác)",
+                    "/done    dừng ghi macro & lưu (khi đang ⏺ ghi)",
                     "/status  xem extension + tool + session",
                     "/sessions liệt kê session cũ",
                     "/models  xem model đang dùng (chat/compact)",
@@ -537,6 +628,19 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/exit    thoát",
                 ]), "dim",
             )
+        elif cmd == "/list" or cmd.startswith("/list "):
+            if len(parts) > 1:
+                self._menu_pick(parts[1])
+            else:
+                self._menu()
+        elif cmd == "/done":
+            if self.rec_mode:
+                nm = self.rec_mode
+                self.rec_mode = ""
+                _p(f"■ Dừng ghi macro '{nm}' — đang lưu...", "ye")
+                self._send(f"Dùng rec_stop để dừng ghi và lưu macro '{nm}', rồi rec_show để xác nhận nội dung")
+            else:
+                _p("Không ở chế độ ghi (ấn 2 trong /list để ghi thao tác).", "dim")
         elif cmd == "/clear":
             self._clear()
         elif cmd == "/stop":
@@ -706,15 +810,16 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         print(C["dim"] + bot + C["reset"])
 
     def _footer_hints(self):
-        _p("/new chat mới · /sessions xem cũ · /stop dừng · /exit thoát", "dim")
+        _p("/list danh mục · /new chat mới · /stop dừng · /exit thoát", "dim")
 
     def _prompt_hint(self):
-        # Opencode-style prompt: dấu ❯ nổi bật
+        # Opencode-style prompt: dấu ❯ nổi bật + ⏺ khi đang ghi macro
+        rec = (C["rd"] + "⏺REC " + C["reset"]) if self.rec_mode else ""
         if self._busy:
-            return C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
+            return rec + C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
         if self._pending:
-            return C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
-        return C["bold"] + C["cy"] + "❯ " + C["reset"]
+            return rec + C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
+        return rec + C["bold"] + C["cy"] + "❯ " + C["reset"]
 
     def run(self):
         self._clear()
@@ -731,7 +836,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 self._header_box()
             except Exception:
                 pass
-            _p("Gõ /sessions để xem lại đoạn cũ | /new để mở đoạn mới", "dim")
+            _p("Gõ /list để chọn danh mục (2 = ghi thao tác) | /sessions xem đoạn cũ", "dim")
             _p(f"Đang khởi chạy extensions...", "dim")
         else:
             try:
@@ -769,6 +874,10 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 if self.slash(line) is False:
                     self.q.put(("quit", None))
                     break
+                continue
+            # Gõ số trần = chọn mục trong /list (vd "2" = ghi thao tác)
+            if re.fullmatch(r"\d+", line) and any(n == line for n, _, _ in MENU):
+                self._menu_pick(line)
                 continue
             # Opencode-style: highlight user input, show as "User" block
             sys.stdout.write("\033[1A\r\033[2K")

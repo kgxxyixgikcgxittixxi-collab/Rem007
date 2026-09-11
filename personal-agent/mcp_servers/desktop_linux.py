@@ -534,6 +534,10 @@ def rec_stop(a=None):
         x = dict(x)
         x.pop("ok", None)
         acts.append(x)
+    if not acts and dropped:
+        _REC.update(active=False, playing=False, name="", actions=[])
+        return (f"[LOI] macro '{data['name']}' rỗng — cả {dropped} bước ghi đều lỗi nên đã tự bỏ hết, "
+                f"KHÔNG lưu macro rỗng. Hãy rec_start lại và kiểm tra từng bước (dl_status trước).")
     data = {"name": _REC["name"], "category": _REC["category"], "actions": acts,
             "created": time.strftime("%Y-%m-%d %H:%M"), "count": len(acts)}
     try:
