@@ -351,6 +351,85 @@ def diff_to_ansi(text, max_lines=40):
     return "\n".join(out)
 
 
+def _extract_diff_lines(text):
+    """Kết quả tool sửa file → list dòng diff (' '/'-'/'+'), bỏ header ---/+++/@@/status."""
+    if not text:
+        return []
+    cands = [ln for ln in str(text).split("\n")
+             if ln.startswith(("---", "+++", "@@", "+", "-", " "))]
+    start = 0
+    for i, ln in enumerate(cands):
+        if ln.startswith("---"):
+            start = i
+            break
+    else:
+        cands = [ln for ln in cands if ln.startswith(("+", "-"))
+                 and not ln.startswith(("+++", "---"))]
+    rows = []
+    for ln in cands[start:]:
+        if ln.startswith(("---", "+++")) or ln.startswith("@@"):
+            continue
+        rows.append(ln)
+    return rows
+
+
+def side_diff_to_ansi(text, tw=None, max_rows=36):
+    """Diff 2 CỘT kiểu opencode: trái = CŨ (đỏ), phải = MỚI (xanh), giữa là │.
+    Dòng giữ nguyên hiện mờ full-width. Trả '' nếu không có diff."""
+    tw = tw or term_width()
+    rows = _extract_diff_lines(text)
+    if not rows:
+        return ""
+    cw = max(20, (tw - 7) // 2)
+
+    def cell(s, width):
+        s = s.replace("\t", "    ")
+        if disp_len(s) > width:
+            while disp_len(s) > width - 1:
+                s = s[:-1]
+            s += "…"
+        return s + " " * max(0, width - disp_len(s))
+
+    out = [DIM + "  " + cell("− CŨ", cw) + " │ " + cell("+ MỚI", cw) + RESET]
+    n_rows, adds, dels = 0, 0, 0
+    i, n = 0, len(rows)
+    truncated = False
+    while i < n:
+        if n_rows >= max_rows:
+            truncated = True
+            break
+        ln = rows[i]
+        if ln.startswith(" ") or not ln.startswith(("-", "+")):
+            # dòng giữ nguyên: mờ, full-width
+            out.append("  " + DIM + cell(ln[1:] if ln.startswith(" ") else ln, cw * 2 + 3) + RESET)
+            n_rows += 1
+            i += 1
+            continue
+        # gom cụm - rồi cụm + kế tiếp → ghép cặp từng dòng
+        minus, plus = [], []
+        while i < n and rows[i].startswith("-") and not rows[i].startswith("---"):
+            minus.append(rows[i][1:])
+            dels += 1
+            i += 1
+        while i < n and rows[i].startswith("+") and not rows[i].startswith("+++"):
+            plus.append(rows[i][1:])
+            adds += 1
+            i += 1
+        for k in range(max(len(minus), len(plus))):
+            if n_rows >= max_rows:
+                truncated = True
+                break
+            left = minus[k] if k < len(minus) else ""
+            right = plus[k] if k < len(plus) else ""
+            out.append("  " + RD + cell("-" + left if left else "", cw) + RESET
+                       + DIM + " │ " + RESET + GR + cell("+" + right if right else "", cw) + RESET)
+            n_rows += 1
+    if truncated:
+        out.append(DIM + f"  ... (còn {n - i} dòng diff nữa)" + RESET)
+    out.append(DIM + f"  ({GR}+{adds}{RESET}{DIM} {RD}-{dels}{RESET}{DIM})" + RESET)
+    return "\n".join(out)
+
+
 def thinking_to_ansi(text, tw=None, full=False):
     """Khối 'Đã suy luận' MỜ kiểu opencode. Mặc định CUỘN GỌN 1 dòng (như chế độ hide),
     chỉ hiển thị vài dòng tóm tắt; full=True in toàn bộ (dùng khối /think)."""

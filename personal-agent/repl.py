@@ -226,9 +226,13 @@ class Repl:
                 self._tool_rows.pop(0)
             _p("\r" + row, "gr" if ok else "rd")
             # Diff cũ/mới kiểu opencode: hiện ngay dưới dòng ✓ khi sửa/tạo file
+            # màn hình rộng → 2 cột CŨ|MỚI, hẹp → diff 1 cột
             if ok and ev.get("name") in ("edit_file", "write_file", "apply_patch") and ev.get("full"):
                 try:
-                    d = render.diff_to_ansi(ev.get("full"))
+                    if render.term_width() >= 100:
+                        d = render.side_diff_to_ansi(ev.get("full"))
+                    else:
+                        d = render.diff_to_ansi(ev.get("full"))
                 except Exception:
                     d = ""
                 if d:
