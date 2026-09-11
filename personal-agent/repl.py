@@ -71,7 +71,7 @@ _SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
           "/stop", "/rest", "/models", "/debug", "/think", "/del", "/auto",
           "/safe", "/status", "/sessions", "/new", "/plan", "/build", "/agent",
           "/lsp", "/mcp", "/init", "/keys", "/key", "/checkupdate", "/update",
-          "/exit", "/quit"]
+          "/exit", "/quit", "/export"]
 
 
 def _p(s, col="cy", end="\n"):
@@ -547,6 +547,37 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         self.q.put(("task", text))
 
     # ── /list: liệt kê macro/skill/chat cũ để chọn số mở ra ─────────────
+    def _export(self):
+        """Xuất đoạn chat hiện tại ra markdown (lưu ~/.rem_ai/exports/<sid>.md)."""
+        try:
+            msgs = sessions.load(self.sid)
+        except Exception as e:
+            _p(f"[LOI] không đọc được session: {e}", "rd")
+            return
+        if not msgs:
+            _p("(đoạn chat trống, không có gì để xuất)", "dim")
+            return
+        lines = [f"# Chat {self.sid}", ""]
+        for m in msgs:
+            role = m.get("role", "?")
+            body = (m.get("content") or "").strip()
+            if role == "user":
+                lines += [f"## 🙋 Bạn", "", body, ""]
+            elif role == "assistant":
+                if body and body != "(rỗng)":
+                    lines += [f"## 🤖 Rem", "", body, ""]
+            elif role == "tool":
+                lines.append(f"- 🔧 `{m.get('name', '?')}`: {body[:200]}")
+        d = os.path.join(config.DIR, "exports")
+        try:
+            os.makedirs(d, exist_ok=True)
+            fp = os.path.join(d, self.sid + ".md")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            _p(f"Đã xuất {len(msgs)} tin nhắn → {fp}", "gr")
+        except Exception as e:
+            _p(f"[LOI] không ghi được file: {e}", "rd")
+
     def _list_items_all(self):
         """Quét macro + skill + session → [(kind, id, desc)]."""
         items = []
@@ -688,6 +719,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/update  tự cập nhật bản mới nhất (git/tarball)",
                     "/lsp <file>  kiểm tra lỗi file nguồn (clangd/pylsp)",
                     "/mcp     xem / nạp lại MCP server ngoài (~/.rem_ai/mcp.json)",
+                    "/export  xuất đoạn chat hiện tại ra file markdown",
                     "/init    tạo AGENTS.md cho thư mục đang làm việc",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
@@ -880,6 +912,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 _p(f"Đã thêm key {k[:10]}... ({len(groq.keys())} keys tổng)", "gr")
             else:
                 _p("Thêm key thất bại.", "rd")
+        elif cmd == "/export":
+            self._export()
         elif cmd == "/exit" or cmd == "/quit":
             return False
         else:
