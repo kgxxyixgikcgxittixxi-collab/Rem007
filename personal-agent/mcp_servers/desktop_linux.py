@@ -13,7 +13,7 @@ import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import threading, shutil, subprocess, time, json, re
+import threading, shutil, subprocess, time, json, re, inspect, functools
 
 from mcplib import Server, Tool, schema
 from config import DIR
@@ -29,6 +29,65 @@ _INTERACTIVE = {
 
 _snap = {"apps": [], "map": {}, "time": 0.0}
 SNAP_TTL = 600.0
+
+# Trạng thái ghi macro (định nghĩa sớm để decorator dùng được cho dl_* bên dưới)
+_REC = {"active": False, "playing": False, "name": "", "category": "khac",
+        "actions": [], "t0": 0.0}
+_REC_MAX = 200
+
+
+def _rec_hook(tool, args):
+    """Móc ghi: decorator @_recorded gọi hàm này trước khi chạy action."""
+    if not _REC["active"] or _REC["playing"]:
+        return
+    try:
+        if len(_REC["actions"]) >= _REC_MAX:
+            return
+        a = dict(args or {})
+        a.pop("a", None)
+        # ref at<N> chết theo phiên → đổi sang name/role bền vững nếu tra được
+        if a.get("ref") and not (a.get("name") or a.get("role")):
+            info = (_snap.get("map") or {}).get(a["ref"]) or {}
+            if info.get("name") or info.get("role"):
+                a = {"name": info.get("name", ""), "role": info.get("role", "")}
+        # cắt text dài (tránh macro phình + dính dữ liệu nhạy cảm dài)
+        for k in ("text", "copy"):
+            if isinstance(a.get(k), str) and len(a[k]) > 1000:
+                a[k] = a[k][:1000]
+        _REC["actions"].append({"tool": tool, "args": a, "ok": None,
+                               "dt": round(time.time() - _REC["t0"], 1)})
+    except Exception:
+        pass
+
+
+def _rec_mark(ok):
+    """Đánh dấu bước vừa ghi là thành công/thất bại (decorator gọi sau khi chạy)."""
+    try:
+        if _REC["active"] and not _REC["playing"] and _REC["actions"]:
+            _REC["actions"][-1]["ok"] = bool(ok)
+    except Exception:
+        pass
+
+
+def _recorded(tool):
+    """Decorator cho dl_*: ghi action + tự đánh dấu thành công/thất bại theo kết quả."""
+    def deco(fn):
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrap(*args, **kwargs):
+            named = {}
+            try:
+                bound = sig.bind_partial(*args, **kwargs)
+                named = dict(bound.arguments)
+            except Exception:
+                named = dict(kwargs)
+            _rec_hook(tool, named)
+            out = fn(*args, **kwargs)
+            _rec_mark(not (isinstance(out, str) and out.startswith(("[LOI]", "[TU CHOI]"))))
+            return out
+        return wrap
+    return deco
 
 
 def _at():
@@ -165,8 +224,8 @@ def _button_center(o):
         return None, None
 
 
+@_recorded("dl_click")
 def dl_click(ref="", name="", role="", a=None):
-    _rec_hook("dl_click", {"ref": ref, "name": name, "role": role})
     at = _at()
     obj = None
     info = ""
@@ -219,9 +278,9 @@ def _find_named(o, name, role):
     return None
 
 
+@_recorded("dl_type")
 def dl_type(text, clear=False, a=None):
     """Gõ text vào phần tử đang focus (xdotool). clear=True thì xoá giá trị cũ trước."""
-    _rec_hook("dl_type", {"text": str(text)[:1000], "clear": bool(clear)})
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
     if clear:
@@ -230,16 +289,16 @@ def dl_type(text, clear=False, a=None):
     return f"OK: đã gõ {len(text)} ký tự." if ok else msg
 
 
+@_recorded("dl_key")
 def dl_key(combo, a=None):
-    _rec_hook("dl_key", {"combo": combo})
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
     ok, msg = _run(["key", str(combo)])
     return f"OK: đã nhấn {combo}." if ok else msg
 
 
+@_recorded("dl_mouse")
 def dl_mouse(x, y, action="click", drag_to=None, a=None):
-    _rec_hook("dl_mouse", {"x": x, "y": y, "action": action, "drag_to": drag_to})
     if not _xd():
         return "[LOI] thiếu xdotool"
     x, y = int(x), int(y)
@@ -259,9 +318,9 @@ def dl_mouse(x, y, action="click", drag_to=None, a=None):
     return f"OK: {action} tại ({x},{y})." if ok else msg
 
 
+@_recorded("dl_clipboard")
 def dl_clipboard(copy="", a=None):
     """copy != '' → ghi nội dung vào clipboard; ngược lại đọc clipboard."""
-    _rec_hook("dl_clipboard", {"copy": str(copy)[:1000]})
     xclip = shutil.which("xclip") or shutil.which("xsel")
     if not xclip:
         return "[LOI] cần xclip hoặc xsel để dùng clipboard"
@@ -437,11 +496,7 @@ MACRO_CATS = {
     "khac": "việc khác không thuộc nhóm trên",
 }
 
-_REC = {"active": False, "playing": False, "name": "", "category": "khac",
-        "actions": [], "t0": 0.0}
-_REC_MAX = 200
-
-
+# (trạng thái _REC/_REC_MAX đã định nghĩa ở đầu file để decorator dùng)
 def _macro_slug(name):
     s = "".join(c if (c.isalnum() or c in "_-") else "_" for c in (name or "").strip().lower())
     return re.sub(r"_+", "_", s).strip("_")[:60] or "macro"
@@ -451,26 +506,7 @@ def _macro_file(name):
     return os.path.join(MACRO_DIR, _macro_slug(name) + ".json")
 
 
-def _rec_hook(tool, args):
-    """Móc ghi: mọi dl_* action đều gọi hàm này đầu tiên khi đang ghi."""
-    if not _REC["active"] or _REC["playing"]:
-        return
-    try:
-        if len(_REC["actions"]) >= _REC_MAX:
-            return
-        a = dict(args or {})
-        a.pop("a", None)
-        # ref at<N> chết theo phiên → đổi sang name/role bền vững nếu tra được
-        if a.get("ref") and not (a.get("name") or a.get("role")):
-            info = (_snap.get("map") or {}).get(a["ref"]) or {}
-            if info.get("name") or info.get("role"):
-                a = {"name": info.get("name", ""), "role": info.get("role", "")}
-        _REC["actions"].append({"tool": tool, "args": a,
-                               "dt": round(time.time() - _REC["t0"], 1)})
-    except Exception:
-        pass
-
-
+# (_rec_hook/_rec_mark/_recorded đã định nghĩa ở đầu file)
 def rec_start(name="", category="khac", a=None):
     cat = (category or "khac").strip().lower().replace(" ", "-")
     if cat not in MACRO_CATS:
@@ -488,8 +524,16 @@ def rec_start(name="", category="khac", a=None):
 def rec_stop(a=None):
     if not _REC["active"]:
         return "[LOI] không có macro nào đang ghi (gọi rec_start trước)"
-    acts = [x for x in _REC["actions"]
-            if not (x["tool"] == "dl_clipboard" and not x["args"].get("copy"))]
+    raw = [x for x in _REC["actions"]
+           if not (x["tool"] == "dl_clipboard" and not x["args"].get("copy"))]
+    dropped = sum(1 for x in raw if x.get("ok") is False)
+    acts = []
+    for x in raw:
+        if x.get("ok") is False:
+            continue
+        x = dict(x)
+        x.pop("ok", None)
+        acts.append(x)
     data = {"name": _REC["name"], "category": _REC["category"], "actions": acts,
             "created": time.strftime("%Y-%m-%d %H:%M"), "count": len(acts)}
     try:
@@ -499,8 +543,10 @@ def rec_stop(a=None):
         _REC.update(active=False, actions=[])
         return f"[LOI] không lưu được macro: {e}"
     msg = (f"Đã lưu macro '{data['name']}' (mục {data['category']}: "
-           f"{MACRO_CATS[data['category']]}) — {len(acts)} bước. "
-           f"Lần sau chỉ cần rec_play(name='{data['name']}') là AI làm lại.")
+           f"{MACRO_CATS[data['category']]}) — {len(acts)} bước.")
+    if dropped:
+        msg += f" (đã tự bỏ {dropped} bước lỗi lúc ghi)."
+    msg += f" Lần sau chỉ cần rec_play(name='{data['name']}') là AI làm lại."
     _REC.update(active=False, playing=False, name="", actions=[])
     return msg
 
