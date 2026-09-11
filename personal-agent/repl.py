@@ -676,6 +676,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             except Exception:
                 pass
             _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
+            _p(f"Đoạn chat mới: {self.sid} (lịch sử trống — không dính chuyện cũ)", "gr")
+            _p("Gõ /sessions để xem lại đoạn cũ | /new để mở đoạn mới", "dim")
             _p(f"Đang khởi chạy extensions...", "dim")
         self.manager.start_all()
         threading.Thread(target=self._worker, daemon=True).start()

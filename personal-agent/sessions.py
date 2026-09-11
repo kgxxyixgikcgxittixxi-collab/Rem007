@@ -1,4 +1,4 @@
-import json, os, time
+import json, os, random, time
 
 from config import DIR, CTX_TOTAL, CTX_CAP, SUM_AT, SUM_BUDGET
 from providers import groq
@@ -14,7 +14,9 @@ def _f(sid):
 
 
 def new():
-    return time.strftime("%Y%m%d-%H%M%S")
+    # ID duy nhất mỗi lần mở (trước đây chỉ chính xác tới giây → mở 2 lần
+    # trong cùng 1 giây sẽ TRÙNG session, đọc lộn lịch sử cũ → agent nói linh tinh).
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid() % 100000:05d}{random.randint(0, 99):02d}"
 
 
 def append(sid, msg):
