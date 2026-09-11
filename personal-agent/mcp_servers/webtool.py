@@ -23,6 +23,16 @@ def _real_url(u):
     return u
 
 
+def _int(v, default):
+    """Ép số an toàn — LLM thỉnh thoảng gửi chuỗi ("5") hoặc chữ rác;
+    int() thẳng sẽ nổ cả MCP server."""
+    try:
+        v = int(v)
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
 def web_search(q, n=5):
     last = ""
     for url in (
@@ -43,7 +53,7 @@ def web_search(q, n=5):
             last = "(không có kết quả)"
             continue
         out = []
-        for i, (u, t) in enumerate(titles[:max(1, int(n))], 1):
+        for i, (u, t) in enumerate(titles[:max(1, _int(n, 5))], 1):
             s = _strip(snips[i - 1]) if i - 1 < len(snips) else ""
             out.append(f"{i}. {_strip(t)}\n   {_real_url(u)}\n   {s}")
         return "\n".join(out)
@@ -51,6 +61,7 @@ def web_search(q, n=5):
 
 
 def web_fetch(url, max_chars=40000):
+    max_chars = _int(max_chars, 40000)
     try:
         r = requests.get(url, headers=UA, timeout=25)
     except Exception as e:
