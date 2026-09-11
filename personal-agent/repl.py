@@ -1,4 +1,4 @@
-import subprocess, os, sys, time, threading, queue, re
+import subprocess, os, sys, time, threading, queue, re, json
 
 import config
 import sessions
@@ -63,17 +63,6 @@ _TOOL_LABEL = {
 }
 
 
-# Menu chọn số kiểu opencode (/list): mỗi mục là 1 chế độ/danh mục công việc.
-# Mục 2 = ghi thao tác desktop (macro recorder): ấn 2 → agent vào chế độ ghi.
-MENU = [
-    ("1", "Chat tự do", "hỏi đáp, code, mọi việc như bình thường"),
-    ("2", "Ghi thao tác", "ghi lại thao tác desktop thành macro để phát lại"),
-    ("3", "Phát lại macro", "chọn macro đã ghi để AI làm lại"),
-    ("4", "Xem macro", "liệt kê macro đã lưu, phân mục theo công việc"),
-    ("5", "Web & tin tức", "tìm kiếm web, đọc trang, tin mới"),
-    ("6", "Video / ảnh / giọng nói", "làm video, ảnh AI, TTS tiếng Việt"),
-    ("7", "Trạng thái", "xem extension, keys, session"),
-]
 MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
                        "mang-xa-hoi", "khac")
 
@@ -205,7 +194,8 @@ class Repl:
         self._live_kind = ""      # "content" | "thinking"
         self._last_think = ""     # khối suy luận gần nhất (để /think xem đầy đủ)
         self._tool_t0 = 0.0       # mốc bắt đầu tool hiện tại (hiện số giây kiểu opencode)
-        self.rec_mode = ""        # tên macro đang ghi (chế độ ghi từ menu /list 2), "" = chat thường
+        self.rec_mode = ""        # tên macro đang ghi (chế độ ghi từ /rec), "" = chat thường
+        self._list_items = []     # [(kind,id,desc)] của lần /list gần nhất (chọn số để mở)
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -531,69 +521,117 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p(f"⏳ Câu hỏi đã xếp hàng (#{self._pending}).", "ye")
         self.q.put(("task", text))
 
-    # ── Menu chọn số (/list) ──────────────────────────────────────────────
-    def _menu(self):
-        _p("— DANH MỤC (gõ số để chọn) —", "bold")
-        for num, name, desc in MENU:
-            mark = " ⏺" if num == "2" and self.rec_mode else ""
-            _p(f"  {num}. {name}{mark} — {desc}", "cy")
-
-    def _macro_cats(self):
+    # ── /list: liệt kê macro/skill/chat cũ để chọn số mở ra ─────────────
+    def _list_items_all(self):
+        """Quét macro + skill + session → [(kind, id, desc)]."""
+        items = []
+        for sub, kind in (("macros", "macro"), ("skills", "skill")):
+            ddir = os.path.join(config.DIR, sub)
+            try:
+                files = sorted(os.listdir(ddir))
+            except Exception:
+                continue
+            for fn in files:
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(ddir, fn), encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                if kind == "macro":
+                    items.append((kind, d.get("name", fn[:-5]),
+                                  f"mục {d.get('category', '?')} · {d.get('count', 0)} bước"))
+                else:
+                    items.append((kind, d.get("name", fn[:-5]),
+                                  f"{len(d.get('steps', []))} bước · dùng {d.get('times', 0)} lần"))
         try:
-            from mcp_servers.desktop_linux import MACRO_CATS
-            return tuple(MACRO_CATS) or MACRO_CATS_FALLBACK
+            rows = sessions.list_all()
         except Exception:
-            return MACRO_CATS_FALLBACK
+            rows = []
+        for sid, t, first in rows[-15:]:
+            items.append(("session", sid, f"{t} · {(first or '(trống)')[:50]}"))
+        return items
 
-    def _menu_pick(self, num):
-        if num == "1":
-            self.rec_mode = ""
-            _p("Đã về chế độ chat tự do.", "gr")
-        elif num == "2":
-            # VÀO CHẾ ĐỘ GHI thao tác: hỏi tên + mục rồi rec_start qua agent
-            if self._busy:
-                _p("Agent đang bận — đợi hết lượt rồi ấn 2 lại.", "ye")
-                return
+    def _list_show(self):
+        self._list_items = self._list_items_all()
+        if not self._list_items:
+            _p("(chưa có macro/skill/chat nào)", "dim")
+            return
+        last_kind, n = "", 0
+        titles = {"macro": "— MACRO (thao tác desktop đã ghi) —",
+                  "skill": "— SKILL (quy trình đã học) —",
+                  "session": "— CHAT CŨ (15 đoạn gần nhất) —"}
+        for kind, _id, desc in self._list_items:
+            if kind != last_kind:
+                _p(titles[kind], "bold")
+                last_kind = kind
+            n += 1
+            _p(f"  {n}. {_id} — {desc}", "cy")
+        _p("Gõ số hoặc /list <số> để mở · /play <số> phát macro · /rec ghi mới", "dim")
+
+    def _list_open(self, num):
+        try:
+            idx = int(num) - 1
+            kind, _id, _desc = self._list_items[idx]
+        except Exception:
+            _p(f"Không có mục {num}. Gõ /list để xem lại.", "dim")
+            return
+        if kind == "macro":
             try:
-                nm = input("  Tên macro (Enter = tự đặt): ").strip()
+                with open(os.path.join(config.DIR, "macros", _id + ".json"), encoding="utf-8") as f:
+                    d = json.load(f)
             except Exception:
+                _p(f"[LOI] không đọc được macro '{_id}'", "rd")
                 return
-            if not nm:
-                nm = "macro-" + time.strftime("%H%M%S")
-            cats = self._macro_cats()
+            _p(f"# Macro '{_id}' — mục {d.get('category', '?')} ({d.get('count', 0)} bước)", "bold")
+            for i, st in enumerate(d.get("actions", []), 1):
+                _p(f"  {i}. {st.get('tool')}({str(st.get('args', {}))[:150]})", "cy")
+            _p(f"Gõ /play {idx + 1} để AI làm lại macro này", "dim")
+        elif kind == "skill":
             try:
-                cat = input(f"  Mục {','.join(cats)} (Enter = khac): ").strip().lower() or "khac"
+                with open(os.path.join(config.DIR, "skills", _id + ".json"), encoding="utf-8") as f:
+                    d = json.load(f)
             except Exception:
+                _p(f"[LOI] không đọc được skill '{_id}'", "rd")
                 return
-            if cat not in cats:
-                _p(f"Mục lạ — dùng 'khac'. Hợp lệ: {','.join(cats)}", "ye")
-                cat = "khac"
-            self.rec_mode = re.sub(r"\s+", "_", nm)[:60]
-            _p(f"⏺ VÀO CHẾ ĐỘ GHI macro '{self.rec_mode}' (mục {cat}).", "rd")
-            _p("  Ra lệnh thao tác desktop như bình thường — xong gõ /done để dừng & lưu.", "dim")
-            self._send(f"Dùng rec_start để bắt đầu ghi macro tên '{self.rec_mode}' mục '{cat}'")
-        elif num == "3":
-            if self._busy:
-                _p("Agent đang bận — đợi hết lượt rồi ấn 3 lại.", "ye")
-                return
-            try:
-                nm = input("  Tên macro cần phát (gõ 4 để xem danh sách trước): ").strip()
-            except Exception:
-                return
-            if not nm:
-                return
-            self._send(f"Dùng rec_play để phát lại macro tên '{nm}' (tốc độ mặc định), rồi xác nhận kết quả")
-        elif num == "4":
-            self._send("Dùng rec_list để liệt kê macro đã lưu theo mục công việc")
-        elif num == "5":
-            _p("Gõ câu hỏi web trực tiếp, vd: tin công nghệ mới nhất hôm nay", "dim")
-        elif num == "6":
-            _p("Gõ yêu cầu media trực tiếp, vd: làm video shorts về mèo", "dim")
-        elif num == "7":
-            self._status()
-            self._sessions()
+            _p(f"# Skill '{_id}' — {d.get('description', '')[:200]}", "bold")
+            for i, st in enumerate(d.get("steps", []), 1):
+                _p(f"  {i}. {st.get('tool')}({str(st.get('args', {}))[:150]})", "cy")
         else:
-            _p(f"Không có mục {num}. Gõ /list để xem.", "dim")
+            try:
+                msgs = sessions.load(_id)
+            except Exception:
+                msgs = []
+            users = [m.get("content", "")[:80] for m in msgs if m.get("role") == "user"]
+            _p(f"# Chat {_id} — {len(msgs)} tin nhắn", "bold")
+            for u in users[:5]:
+                _p(f"  · {u}", "cy")
+            _p(f"Gõ /resume {idx + 1} để mở lại đoạn chat này", "dim")
+
+    def _rec_start_flow(self):
+        # VÀO CHẾ ĐỘ GHI thao tác: hỏi tên + mục rồi rec_start qua agent
+        if self._busy:
+            _p("Agent đang bận — đợi hết lượt rồi gõ /rec lại.", "ye")
+            return
+        try:
+            nm = input("  Tên macro (Enter = tự đặt): ").strip()
+        except Exception:
+            return
+        if not nm:
+            nm = "macro-" + time.strftime("%H%M%S")
+        cats = self._macro_cats()
+        try:
+            cat = input(f"  Mục {','.join(cats)} (Enter = khac): ").strip().lower() or "khac"
+        except Exception:
+            return
+        if cat not in cats:
+            _p(f"Mục lạ — dùng 'khac'. Hợp lệ: {','.join(cats)}", "ye")
+            cat = "khac"
+        self.rec_mode = re.sub(r"\s+", "_", nm)[:60]
+        _p(f"⏺ VÀO CHẾ ĐỘ GHI macro '{self.rec_mode}' (mục {cat}).", "rd")
+        _p("  Ra lệnh thao tác desktop như bình thường — xong gõ /done để dừng & lưu.", "dim")
+        self._send(f"Dùng rec_start để bắt đầu ghi macro tên '{self.rec_mode}' mục '{cat}'")
 
     def slash(self, line):
         cmd = line.strip()
@@ -602,7 +640,10 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p(
                 "\n".join([
                     "/help    trợ giúp",
-                    "/list    danh mục chọn số (2 = ghi thao tác)",
+                    "/list    liệt kê macro/skill/chat cũ (gõ số để mở)",
+                    "/rec     ghi thao tác desktop thành macro",
+                    "/play <số>  phát lại macro trong /list",
+                    "/resume <số>  mở lại đoạn chat cũ trong /list",
                     "/done    dừng ghi macro & lưu (khi đang ⏺ ghi)",
                     "/status  xem extension + tool + session",
                     "/sessions liệt kê session cũ",
@@ -630,9 +671,46 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             )
         elif cmd == "/list" or cmd.startswith("/list "):
             if len(parts) > 1:
-                self._menu_pick(parts[1])
+                if not self._list_items:
+                    self._list_items = self._list_items_all()
+                self._list_open(parts[1])
             else:
-                self._menu()
+                self._list_show()
+        elif cmd == "/rec":
+            self._rec_start_flow()
+        elif cmd == "/play" or cmd.startswith("/play "):
+            if len(parts) < 2:
+                _p("Cú pháp: /play <số>  (xem số trong /list)", "dim")
+            else:
+                if not self._list_items:
+                    self._list_items = self._list_items_all()
+                try:
+                    kind, _id, _d = self._list_items[int(parts[1]) - 1]
+                except Exception:
+                    _p(f"Không có mục {parts[1]}. Gõ /list để xem lại.", "dim")
+                    return True
+                if kind != "macro":
+                    _p("Mục này không phải macro (chỉ phát lại được macro).", "ye")
+                else:
+                    self._send(f"Dùng rec_play để phát lại macro tên '{_id}' (tốc độ mặc định), rồi xác nhận kết quả")
+        elif cmd == "/resume" or cmd.startswith("/resume "):
+            if len(parts) < 2:
+                _p("Cú pháp: /resume <số>  (xem số trong /list)", "dim")
+            else:
+                if not self._list_items:
+                    self._list_items = self._list_items_all()
+                try:
+                    kind, _id, _d = self._list_items[int(parts[1]) - 1]
+                except Exception:
+                    _p(f"Không có mục {parts[1]}. Gõ /list để xem lại.", "dim")
+                    return True
+                if kind != "session":
+                    _p("Mục này không phải đoạn chat.", "ye")
+                else:
+                    self.sid = _id
+                    self.rec_mode = ""
+                    self._mk_agent(sid=self.sid)
+                    _p(f"Đã mở lại đoạn chat {_id} (lịch sử cũ được giữ).", "gr")
         elif cmd == "/done":
             if self.rec_mode:
                 nm = self.rec_mode
@@ -836,7 +914,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 self._header_box()
             except Exception:
                 pass
-            _p("Gõ /list để chọn danh mục (2 = ghi thao tác) | /sessions xem đoạn cũ", "dim")
+            _p("Gõ /list để xem macro/skill/chat cũ (chọn số để mở) | /rec để ghi thao tác", "dim")
             _p(f"Đang khởi chạy extensions...", "dim")
         else:
             try:
@@ -875,9 +953,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     self.q.put(("quit", None))
                     break
                 continue
-            # Gõ số trần = chọn mục trong /list (vd "2" = ghi thao tác)
-            if re.fullmatch(r"\d+", line) and any(n == line for n, _, _ in MENU):
-                self._menu_pick(line)
+            # Gõ số trần = mở mục trong /list gần nhất (vd "2" mở mục số 2)
+            if re.fullmatch(r"\d+", line):
+                if self._list_items:
+                    self._list_open(line)
+                else:
+                    _p("Gõ /list trước để xem danh sách rồi chọn số.", "dim")
                 continue
             # Opencode-style: highlight user input, show as "User" block
             sys.stdout.write("\033[1A\r\033[2K")
