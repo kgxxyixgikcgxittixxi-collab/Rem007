@@ -66,6 +66,13 @@ _TOOL_LABEL = {
 MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
                        "mang-xa-hoi", "khac")
 
+# Registry lệnh / để gợi ý khi gõ sai/gõ dở (kiểu autocomplete opencode)
+_SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
+          "/stop", "/rest", "/models", "/debug", "/think", "/del", "/auto",
+          "/safe", "/status", "/sessions", "/new", "/plan", "/build", "/agent",
+          "/lsp", "/mcp", "/init", "/keys", "/key", "/checkupdate", "/update",
+          "/exit", "/quit"]
+
 
 def _p(s, col="cy", end="\n"):
     print(C.get(col, "") + str(s) + C["reset"], end=end, flush=True)
@@ -876,6 +883,15 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         elif cmd == "/exit" or cmd == "/quit":
             return False
         else:
+            if cmd.startswith("/"):
+                frag = cmd.split()[0]
+                sug = [s for s in _SLASH if s.startswith(frag) and s != frag][:5]
+                if len(sug) == 1:
+                    # gõ dở mà khớp duy nhất → chạy luôn (vd /lis 2 = /list 2)
+                    return self.slash(sug[0] + cmd[len(frag):])
+                if sug:
+                    _p(f"Không rõ lệnh. Ý bạn là: {' · '.join(sug)} ?", "ye")
+                    return True
             _p("Không rõ lệnh. Gõ /help.", "dim")
         return True
 
@@ -923,7 +939,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         print(C["dim"] + left + " " * pad + right + C["reset"], flush=True)
 
     def _prompt_hint(self):
-        # Opencode-style prompt: dấu ❯ nổi bật + ⏺ khi đang ghi macro + 📥 chỉ đạo chờ
+        # Opencode-style: thẻ nhập 2 dòng (dòng gợi ý mờ + dòng ❯ nhập liệu)
         try:
             lv = self._agent.live_count()
         except Exception:
@@ -931,10 +947,14 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         rec = (C["rd"] + "⏺REC " + C["reset"]) if self.rec_mode else ""
         live = (C["ye"] + f"📥{lv} " + C["reset"]) if lv else ""
         if self._busy:
-            return rec + live + C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
+            return (rec + live + C["dim"] + "⏳ " + C["reset"]
+                    + C["bold"] + C["cy"] + "❯ " + C["reset"])
         if self._pending:
-            return rec + live + C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
-        return rec + live + C["bold"] + C["cy"] + "❯ " + C["reset"]
+            return (rec + live + C["dim"] + f"⏳({self._pending}) " + C["reset"]
+                    + C["bold"] + C["cy"] + "❯ " + C["reset"])
+        card_top = (C["dim"] + "╭─❯ gõ câu hỏi · /list danh mục · /rec ghi thao tác"
+                    + C["reset"] + "\n")
+        return card_top + rec + live + C["bold"] + C["cy"] + "╰─❯ " + C["reset"]
 
     def run(self):
         self._clear()

@@ -148,10 +148,21 @@ class Manager:
             if e.external:
                 e.close()
         self.extensions = [e for e in self.extensions if not e.external]
-        for s in _external_specs():
-            e = Extension(**s)
-            e.start()
-            self.extensions.append(e)
+        specs = _external_specs()
+        if not specs:
+            return
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=min(len(specs), 6)) as _ex:
+            def _mk(s):
+                try:
+                    e = Extension(**s)
+                    e.start()
+                    return e
+                except Exception:
+                    return None
+            for e in _ex.map(_mk, specs):
+                if e is not None:
+                    self.extensions.append(e)
 
     def external_list(self):
         return [e for e in self.extensions if e.external]

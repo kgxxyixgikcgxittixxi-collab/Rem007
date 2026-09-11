@@ -68,6 +68,18 @@ def _verify_version(target):
 
 
 def _git_pull(lines):
+    # An toàn: cây đang bẩn (code chưa commit) → stash trước, reset xong pop lại.
+    # (Trước đây reset --hard thẳng tay làm mất thay đổi chưa commit.)
+    code, out, _ = _run(["git", "-C", _REPO_ROOT, "status", "--porcelain"])
+    stashed = False
+    if code == 0 and out.strip():
+        c2, _, e2 = _run(["git", "-C", _REPO_ROOT, "stash", "push", "-m", "rem-auto-update"])
+        if c2 == 0:
+            stashed = True
+            lines.append("[i] Đã stash thay đổi chưa commit trước khi update.")
+        else:
+            lines.append(f"[!] Cây đang bẩn mà stash lỗi ({e2[:100]}) — HỦY update để khỏi mất code.")
+            return False
     code, _, err = _run(["git", "-C", _REPO_ROOT, "fetch", "--quiet", "origin", config.GIT_BRANCH])
     if code != 0:
         lines.append(f"[!] git fetch lỗi: {err[:150]}")
@@ -77,6 +89,10 @@ def _git_pull(lines):
         lines.append(f"[!] git reset lỗi: {err[:150]}")
         return False
     lines.append("✓ Đã pull source mới từ GitHub (git).")
+    if stashed:
+        c3, _, e3 = _run(["git", "-C", _REPO_ROOT, "stash", "pop"])
+        lines.append("✓ Đã khôi phục thay đổi chưa commit." if c3 == 0
+                     else f"[!] pop stash lỗi ({e3[:150]}) — code cũ nằm trong `git stash list`.")
     return True
 
 
