@@ -541,8 +541,8 @@ def rec_stop(a=None):
     data = {"name": _REC["name"], "category": _REC["category"], "actions": acts,
             "created": time.strftime("%Y-%m-%d %H:%M"), "count": len(acts)}
     try:
-        with open(_macro_file(_REC["name"]), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
+        from mcplib import atomic_write_json
+        atomic_write_json(_macro_file(_REC["name"]), data)
     except Exception as e:
         _REC.update(active=False, actions=[])
         return f"[LOI] không lưu được macro: {e}"

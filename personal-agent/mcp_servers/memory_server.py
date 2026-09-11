@@ -19,8 +19,8 @@ def _load():
 
 
 def _save(d):
-    with open(SESSFILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False)
+    from mcplib import atomic_write_json
+    atomic_write_json(SESSFILE, d)
 
 
 def remember(key, value):

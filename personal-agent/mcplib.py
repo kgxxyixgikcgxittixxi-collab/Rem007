@@ -34,6 +34,29 @@ def clamp(text, n=60000):
     return text
 
 
+def atomic_write_json(path, obj):
+    """Ghi JSON atomic (tmp + replace): nhiều tiến trình Remtm/MCP cùng viết
+    1 file (skills, memory, macro...) không lo rách file/mất dữ liệu khi crash."""
+    import os
+    import tempfile as _tf
+    d = os.path.dirname(os.path.abspath(path))
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    fd, tmp = _tf.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
+
+
 class Tool:
     def __init__(self, name, description, parameters, func):
         self.name = name

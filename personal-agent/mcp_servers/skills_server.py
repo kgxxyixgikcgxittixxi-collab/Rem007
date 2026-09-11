@@ -40,8 +40,8 @@ def _load(name):
 
 def _save(skill):
     fp = os.path.join(SKILL_DIR, _slug(skill["name"]) + ".json")
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump(skill, f, ensure_ascii=False, indent=1)
+    from mcplib import atomic_write_json
+    atomic_write_json(fp, skill)
 
 
 def _all_skills():
