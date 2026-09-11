@@ -14,9 +14,12 @@ def _f(sid):
 
 
 def new():
-    # ID duy nhất mỗi lần mở (trước đây chỉ chính xác tới giây → mở 2 lần
-    # trong cùng 1 giây sẽ TRÙNG session, đọc lộn lịch sử cũ → agent nói linh tinh).
-    return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid() % 100000:05d}{random.randint(0, 99):02d}"
+    # ID duy nhất mỗi lần mở: timestamp tới microgiây + pid + random.
+    # (Bản cũ chỉ chính xác tới giây + random 2 số → gọi nhanh liên tiếp vẫn TRÙNG,
+    # đọc lộn lịch sử cũ → agent nói linh tinh.)
+    import time as _t
+    ts = _t.strftime("%Y%m%d-%H%M%S") + f"{_t.time_ns() % 1_000_000:06d}"
+    return f"{ts}-{os.getpid() % 100000:05d}{random.randint(0, 9999):04d}"
 
 
 def append(sid, msg):

@@ -13,9 +13,10 @@ import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import threading, shutil, subprocess, time
+import threading, shutil, subprocess, time, json, re
 
 from mcplib import Server, Tool, schema
+from config import DIR
 
 _lock = threading.Lock()
 
@@ -165,6 +166,7 @@ def _button_center(o):
 
 
 def dl_click(ref="", name="", role="", a=None):
+    _rec_hook("dl_click", {"ref": ref, "name": name, "role": role})
     at = _at()
     obj = None
     info = ""
@@ -219,6 +221,7 @@ def _find_named(o, name, role):
 
 def dl_type(text, clear=False, a=None):
     """Gõ text vào phần tử đang focus (xdotool). clear=True thì xoá giá trị cũ trước."""
+    _rec_hook("dl_type", {"text": str(text)[:1000], "clear": bool(clear)})
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
     if clear:
@@ -228,6 +231,7 @@ def dl_type(text, clear=False, a=None):
 
 
 def dl_key(combo, a=None):
+    _rec_hook("dl_key", {"combo": combo})
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
     ok, msg = _run(["key", str(combo)])
@@ -235,6 +239,7 @@ def dl_key(combo, a=None):
 
 
 def dl_mouse(x, y, action="click", drag_to=None, a=None):
+    _rec_hook("dl_mouse", {"x": x, "y": y, "action": action, "drag_to": drag_to})
     if not _xd():
         return "[LOI] thiếu xdotool"
     x, y = int(x), int(y)
@@ -256,6 +261,7 @@ def dl_mouse(x, y, action="click", drag_to=None, a=None):
 
 def dl_clipboard(copy="", a=None):
     """copy != '' → ghi nội dung vào clipboard; ngược lại đọc clipboard."""
+    _rec_hook("dl_clipboard", {"copy": str(copy)[:1000]})
     xclip = shutil.which("xclip") or shutil.which("xsel")
     if not xclip:
         return "[LOI] cần xclip hoặc xsel để dùng clipboard"
@@ -414,6 +420,190 @@ def dl_text(app="", a=None):
     return "\n".join(texts[:300])
 
 
+# ── Macro recorder: GHI thao tác desktop rồi PHÁT LẠI ──────────────────────
+# Cách dùng: rec_start(name, category) → làm việc bằng dl_* như bình thường →
+# rec_stop() lưu. Lần sau: rec_play(name) là AI làm lại toàn bộ.
+# Macro phân mục rõ theo công việc (giống nhóm module của agent).
+
+MACRO_DIR = os.path.join(DIR, "macros")
+os.makedirs(MACRO_DIR, exist_ok=True)
+
+MACRO_CATS = {
+    "van-phong": "soạn thảo văn bản, bảng tính, tài liệu",
+    "trinh-duyet": "lướt web, tra cứu, xem video",
+    "he-thong": "cài đặt hệ thống, quản lý file, terminal",
+    "giai-tri": "nhạc, phim, game",
+    "mang-xa-hoi": "đăng bài, nhắn tin, bình luận",
+    "khac": "việc khác không thuộc nhóm trên",
+}
+
+_REC = {"active": False, "playing": False, "name": "", "category": "khac",
+        "actions": [], "t0": 0.0}
+_REC_MAX = 200
+
+
+def _macro_slug(name):
+    s = "".join(c if (c.isalnum() or c in "_-") else "_" for c in (name or "").strip().lower())
+    return re.sub(r"_+", "_", s).strip("_")[:60] or "macro"
+
+
+def _macro_file(name):
+    return os.path.join(MACRO_DIR, _macro_slug(name) + ".json")
+
+
+def _rec_hook(tool, args):
+    """Móc ghi: mọi dl_* action đều gọi hàm này đầu tiên khi đang ghi."""
+    if not _REC["active"] or _REC["playing"]:
+        return
+    try:
+        if len(_REC["actions"]) >= _REC_MAX:
+            return
+        a = dict(args or {})
+        a.pop("a", None)
+        # ref at<N> chết theo phiên → đổi sang name/role bền vững nếu tra được
+        if a.get("ref") and not (a.get("name") or a.get("role")):
+            info = (_snap.get("map") or {}).get(a["ref"]) or {}
+            if info.get("name") or info.get("role"):
+                a = {"name": info.get("name", ""), "role": info.get("role", "")}
+        _REC["actions"].append({"tool": tool, "args": a,
+                               "dt": round(time.time() - _REC["t0"], 1)})
+    except Exception:
+        pass
+
+
+def rec_start(name="", category="khac", a=None):
+    cat = (category or "khac").strip().lower().replace(" ", "-")
+    if cat not in MACRO_CATS:
+        return f"[LOI] mục không hợp lệ. Chọn 1 trong: {', '.join(MACRO_CATS)}"
+    if _REC["active"]:
+        return f"[LOI] đang ghi macro '{_REC['name']}' — gọi rec_stop trước đã"
+    nm = _macro_slug(name)
+    _REC.update(active=True, playing=False, name=nm, category=cat, actions=[],
+                t0=time.time())
+    return (f"ĐANG GHI macro '{nm}' (mục {cat}: {MACRO_CATS[cat]}). "
+            f"Giờ thực hiện thao tác bằng dl_click/dl_type/dl_key/dl_mouse như bình thường, "
+            f"xong gọi rec_stop để lưu. LƯU Ý: đừng gõ mật khẩu khi đang ghi.")
+
+
+def rec_stop(a=None):
+    if not _REC["active"]:
+        return "[LOI] không có macro nào đang ghi (gọi rec_start trước)"
+    acts = [x for x in _REC["actions"]
+            if not (x["tool"] == "dl_clipboard" and not x["args"].get("copy"))]
+    data = {"name": _REC["name"], "category": _REC["category"], "actions": acts,
+            "created": time.strftime("%Y-%m-%d %H:%M"), "count": len(acts)}
+    try:
+        with open(_macro_file(_REC["name"]), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        _REC.update(active=False, actions=[])
+        return f"[LOI] không lưu được macro: {e}"
+    msg = (f"Đã lưu macro '{data['name']}' (mục {data['category']}: "
+           f"{MACRO_CATS[data['category']]}) — {len(acts)} bước. "
+           f"Lần sau chỉ cần rec_play(name='{data['name']}') là AI làm lại.")
+    _REC.update(active=False, playing=False, name="", actions=[])
+    return msg
+
+
+def rec_list(category="", a=None):
+    cat = (category or "").strip().lower()
+    groups = {}
+    try:
+        for fn in sorted(os.listdir(MACRO_DIR)):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(MACRO_DIR, fn), encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception:
+                continue
+            c = d.get("category", "khac")
+            if cat and c != cat:
+                continue
+            groups.setdefault(c, []).append(d)
+    except Exception:
+        pass
+    if not groups:
+        return "(chưa có macro nào — ghi bằng rec_start, làm việc, rồi rec_stop)"
+    out = []
+    for c in MACRO_CATS:
+        if c not in groups:
+            continue
+        out.append(f"## {c} — {MACRO_CATS[c]}")
+        for d in groups[c]:
+            out.append(f"- {d.get('name')}: {d.get('count', 0)} bước (lưu {d.get('created', '?')})")
+    return "\n".join(out)
+
+
+def rec_show(name="", a=None):
+    try:
+        with open(_macro_file(name), encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return f"[LOI] không có macro '{name}' (xem rec_list)"
+    lines = [f"# Macro '{d.get('name')}' — mục {d.get('category')} ({d.get('count', 0)} bước)"]
+    for i, st in enumerate(d.get("actions", []), 1):
+        lines.append(f"{i}. {st.get('tool')}({str(st.get('args', {}))[:160]}) sau {st.get('dt', 0)}s")
+    return "\n".join(lines)
+
+
+def rec_delete(name="", a=None):
+    try:
+        os.remove(_macro_file(name))
+        return f"Đã xoá macro '{name}'."
+    except Exception:
+        return f"[LOI] không có macro '{name}' để xoá"
+
+
+_REC_FN = None  # gán sau khi định nghĩa xong (tránh forward-reference)
+
+
+def rec_play(name="", speed=1.0, a=None):
+    """Phát lại macro: AI tự làm lại toàn bộ thao tác đã ghi."""
+    if _REC["active"]:
+        return "[LOI] đang ghi macro khác — rec_stop trước rồi mới phát"
+    try:
+        with open(_macro_file(name), encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return f"[LOI] không có macro '{name}' (xem rec_list)"
+    acts = d.get("actions", [])
+    if not acts:
+        return f"[LOI] macro '{name}' rỗng, không có gì để phát"
+    try:
+        sp = max(0.25, min(float(speed or 1.0), 4.0))
+    except Exception:
+        sp = 1.0
+    _REC["playing"] = True
+    ok, fail = 0, []
+    try:
+        for i, st in enumerate(acts):
+            fn = (_REC_FN or {}).get(st.get("tool"))
+            if not fn:
+                fail.append(f"b{i + 1}: tool lạ {st.get('tool')}")
+                continue
+            if i:
+                time.sleep(max(0.2, min(float(st.get("dt", 0.5)) / sp, 5.0)))
+            try:
+                r = fn(**(st.get("args") or {}))
+                if isinstance(r, str) and (r.startswith("[LOI]") or r.startswith("[TU CHOI]")):
+                    fail.append(f"b{i + 1}: {r[:100]}")
+                else:
+                    ok += 1
+            except Exception as e:
+                fail.append(f"b{i + 1}: {type(e).__name__} {str(e)[:80]}")
+    finally:
+        _REC["playing"] = False
+    rep = f"Phát macro '{d.get('name')}': {ok}/{len(acts)} bước OK."
+    if fail:
+        rep += " Lỗi:\n" + "\n".join(f"- {x}" for x in fail[:8])
+    return rep
+
+
+_REC_FN = {"dl_click": dl_click, "dl_type": dl_type, "dl_key": dl_key,
+           "dl_mouse": dl_mouse, "dl_clipboard": dl_clipboard}
+
+
 TOOLS = [
     Tool("dl_status", "KIỂM TRA desktop: xem pyatspi/xdotool có sẵn không. LUÔN gọi đầu tiên.",
          schema({}), dl_status),
@@ -454,6 +644,28 @@ TOOLS = [
     Tool("dl_clipboard", "ĐỌC/GHI clipboard (cần xclip/xsel).",
          schema({"copy": {"type": "string", "default": ""}}),
          dl_clipboard),
+    Tool("rec_start", "BẮT ĐẦU GHI macro: mọi thao tác dl_* sau đó được ghi lại theo mục công việc. "
+         "Xong gọi rec_stop để lưu. Lần sau rec_play là AI làm lại.",
+         schema({"name": {"type": "string", "description": "tên macro (vd mo_nhac)"},
+                 "category": {"type": "string",
+                              "description": "mục: van-phong|trinh-duyet|he-thong|giai-tri|mang-xa-hoi|khac",
+                              "default": "khac"}}),
+         rec_start),
+    Tool("rec_stop", "DỪNG GHI và lưu macro vừa ghi (phân mục theo công việc).",
+         schema({}), rec_stop),
+    Tool("rec_list", "LIỆT KÊ macro đã lưu, PHÂN MỤC rõ theo công việc.",
+         schema({"category": {"type": "string", "description": "lọc theo mục (rỗng = tất cả)", "default": ""}}),
+         rec_list),
+    Tool("rec_show", "XEM CHI TIẾT từng bước của 1 macro.",
+         schema({"name": {"type": "string"}}),
+         rec_show),
+    Tool("rec_play", "PHÁT LẠI macro: AI tự làm lại toàn bộ thao tác đã ghi.",
+         schema({"name": {"type": "string"},
+                 "speed": {"type": "number", "description": "tốc độ phát (0.25-4, mặc định 1)", "default": 1.0}}),
+         rec_play),
+    Tool("rec_delete", "XOÁ 1 macro đã lưu.",
+         schema({"name": {"type": "string"}}),
+         rec_delete),
 ]
 
 if __name__ == "__main__":

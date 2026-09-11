@@ -31,7 +31,7 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # Nhãn tool theo phong cách opencode (InlineTool/ToolStatusTitle)
 _TOOL_LABEL = {
     "read_file": "Read", "write_file": "Write", "edit_file": "Edit",
-    "apply_patch": "Patch", "bash": "Bash", "list_dir": "List",
+    "apply_patch": "Patch", "bash": "Bash", "bash_poll": "Job", "list_dir": "List",
     "glob_files": "Glob", "grep": "Grep", "web_search": "WebSearch",
     "web_fetch": "WebFetch", "remember": "Remember", "recall": "Recall",
     "ensure_tool": "Setup", "pip_install": "PyPI", "github_api": "GitHub",
@@ -52,7 +52,14 @@ _TOOL_LABEL = {
     "social_cycle": "Social", "social_report": "SocialRep", "social_status": "SocialSt",
     "social_post": "SocialPost", "dl_find": "Find", "dl_text": "ReadScreen",
     "dl_status": "DeskStatus", "dl_apps": "Apps", "dl_tree": "DeskTree",
-    "dl_click": "Click", "dl_type": "Type", "dl_key": "Key",
+    "dl_click": "Click", "dl_type": "Type", "dl_key": "Key", "dl_mouse": "Mouse",
+    "dl_clipboard": "Clip",
+    "rec_start": "Rec", "rec_stop": "RecStop", "rec_list": "RecList",
+    "rec_show": "RecShow", "rec_play": "RecPlay", "rec_delete": "RecDel",
+    "browser_status": "BStatus", "cwd": "Cwd", "chdir": "Cd",
+    "lsp_supported": "LSPSup", "lsp_diagnostics": "LSPDiag", "lsp_definition": "LSPDef",
+    "lsp_references": "LSPRef", "lsp_symbols": "LSPSym", "lsp_hover": "LSPHover",
+    "media_status": "MediaSt",
 }
 
 

@@ -19,6 +19,72 @@ def _budget(deadline, step_deadline=None):
     return min(_CALL_BUDGET, max(15, int(deadline - time.time())))
 
 
+# ── Định tuyến module theo công việc ─────────────────────────────────────
+# Mỗi nhóm công việc → module MCP phù hợp. Agent ĐỌC phần này để chọn tool đúng
+# ngay từ đầu (đỡ gọi lung tung), và macro recorder cũng phân mục theo nhóm này.
+MODULE_GROUPS = {
+    "lap-trinh":   {"desc": "code, file, shell, sửa lỗi, git, cài package",
+                    "modules": ["developer", "lsp"]},
+    "web":         {"desc": "tìm kiếm web, đọc trang, GitHub, tin tức",
+                    "modules": ["webtool", "browser_auto"]},
+    "desktop":     {"desc": "mở app, click, gõ phím, điều khiển máy tính",
+                    "modules": ["desktop_linux"]},
+    "media":       {"desc": "video, ảnh AI, giọng nói TTS, nhạc, cắt ghép",
+                    "modules": ["media_tools"]},
+    "mang-xa-hoi": {"desc": "đăng bài, bình luận, theo dõi Facebook/YouTube/TikTok",
+                    "modules": ["social_auto"]},
+    "ghi-nho":     {"desc": "ghi nhớ, học quy trình, xem lại bài học",
+                    "modules": ["memory", "skills", "experience"]},
+}
+# macro recorder dùng cùng bộ mục + thêm mục chung
+MACRO_CATS = dict(MODULE_GROUPS)
+MACRO_CATS["khac"] = {"desc": "việc khác không thuộc nhóm trên", "modules": []}
+
+_ROUTE_KW = [
+    (("code", "lập trình", "lap trinh", "sửa lỗi", "sua loi", "bug", "hàm", "class",
+      "python", "script", "file", "thư mục", "thu muc", "git", "commit", "cài package",
+      "cai package", "pip", "terminal", "lệnh", "lenh bash"), "lap-trinh"),
+    (("tìm", "tim kiem", "tìm kiếm", "web", "tin tức", "tin tuc", "giá", "gia ",
+      "github", "đọc trang", "doc trang", "xem video", "youtube xem"), "web"),
+    (("mở app", "mo app", "mở ứng dụng", "click", "nhấn nút", "gõ phím", "man hinh",
+      "màn hình", "desktop", "cửa sổ", "cua so", "chụp", "ứng dụng",
+      "macro", "ghi lại", "phát lại", "thao tác"), "desktop"),
+    (("video", "ảnh", "anh ai", "giọng", "giong noi", "giọng nói", "nói", "mp3",
+      "tts", "nhạc", "nhac", "cắt ghép", "slideshow", "shorts"), "media"),
+    (("facebook", "đăng bài", "dang bai", "tiktok", "instagram", "twitter",
+      "bình luận", "mạng xã hội", "theo dõi", "đăng youtube"), "mang-xa-hoi"),
+    (("nhớ", "nho ", "ghi nhớ", "skill", "bài học", "bai hoc", "kinh nghiệm"), "ghi-nho"),
+]
+
+
+def route_task(user_text):
+    """Đoán nhóm công việc từ câu lệnh → (groups, modules). Không đoán được → ([], [])."""
+    t = f" {(user_text or '').lower()} "
+    groups = []
+    for kws, g in _ROUTE_KW:
+        if any(k in t for k in kws):
+            groups.append(g)
+    mods = []
+    for g in groups:
+        for m in MODULE_GROUPS[g]["modules"]:
+            if m not in mods:
+                mods.append(m)
+    return groups, mods
+
+
+def _route_section(user_text):
+    groups, mods = route_task(user_text or "")
+    if not groups:
+        return ""
+    gl = ", ".join(f"{g} ({MODULE_GROUPS[g]['desc']})" for g in groups)
+    ml = ", ".join(mods)
+    return (f"\n\nĐỊNH TUYẾN CÔNG VIỆC: câu này thuộc nhóm [{gl}]. "
+            f"ƯU TIÊN tool của module [{ml}] trước — đúng tool ngay từ bước đầu, "
+            f"không gọi lung tung module khác trừ khi cần. "
+            f"Việc desktop lặp lại → dùng macro recorder (rec_start/rec_play, xem rec_list) "
+            f"thay vì click tay từng bước.")
+
+
 def _load_skills_prompt():
     """Load các skill đã học vào system prompt (tự tiến hoá kiểu GenericAgent)."""
     try:
@@ -71,7 +137,7 @@ def _load_agents_md(cwd):
     return "\n\n".join(instructions)
 
 
-def _sys(manager, sid, cwd):
+def _sys(manager, sid, cwd, user_text=""):
     tools = "\n".join(
         f"- {t['function']['name']}: {t['function']['description']}"
         for t in manager.schemas()
@@ -179,6 +245,7 @@ def _sys(manager, sid, cwd):
             f"{agents_section}"
             f"{skills_section}"
             f"{exp_section}"
+            f"{_route_section(user_text)}"
         ),
     }
 
@@ -304,7 +371,7 @@ class Agent:
             stopped = self._check_stop(deadline)
             if stopped:
                 return self._finish(user_text, stopped)
-            msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
+            msgs = [_sys(self.manager, self.sid, self._cwd(), user_text), *sessions.load(self.sid)]
             if turn > 1:
                 self._emit({"type": "turn", "turn": turn})
                 msgs = sessions.load(self.sid)
@@ -445,7 +512,7 @@ class Agent:
                         self.sid,
                         {"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": result},
                     )
-                msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
+                msgs = [_sys(self.manager, self.sid, self._cwd(), user_text), *sessions.load(self.sid)]
                 if (step + 1) % CHECKPOINT_EVERY == 0:
                     try:
                         summary = f"task={self._task_hash} turn={turn} step={step+1} errors={len(self._error_patterns)}"

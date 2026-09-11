@@ -239,11 +239,101 @@ def _todo_save(sid, todos):
 
 # ── core tools ──────────────────────────────────────────────────────────────
 
+JOB_DIR = os.path.join(DIR, "jobs")
+os.makedirs(JOB_DIR, exist_ok=True)
+
+
+def _job_file(pid):
+    return os.path.join(JOB_DIR, f"{pid}.json")
+
+
+def _job_save(pid, cmd, out_path, err_path):
+    try:
+        with open(_job_file(pid), "w", encoding="utf-8") as f:
+            json.dump({"pid": pid, "cmd": cmd[:500], "out": out_path,
+                       "err": err_path, "started": time.strftime("%H:%M:%S")}, f)
+    except Exception:
+        pass
+
+
+def _job_alive(pid):
+    try:
+        pid = int(pid)
+    except Exception:
+        return False
+    # đọc /proc để phân biệt zombie (đã xong nhưng chưa reap) với đang chạy thật
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            parts = f.read().rsplit(")", 1)[-1].split()
+            if parts and parts[0] == "Z":
+                return False
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def bash_poll(pid="", action="poll"):
+    """Kiểm tra/giết/liệt kê job bash chạy nền (job tự tạo khi bash timeout).
+    action: poll (xem trạng thái + output mới) | kill (dừng job) | list (liệt kê)."""
+    act = (action or "poll").strip().lower()
+    if act == "list" or (not pid and act != "kill"):
+        rows = []
+        try:
+            for fn in sorted(os.listdir(JOB_DIR)):
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(JOB_DIR, fn), encoding="utf-8") as f:
+                        j = json.load(f)
+                except Exception:
+                    continue
+                st = "chạy" if _job_alive(j.get("pid", -1)) else "xong"
+                rows.append(f"- {j.get('pid')} [{st}] từ {j.get('started', '?')}: {str(j.get('cmd', ''))[:80]}")
+        except Exception:
+            pass
+        return "\n".join(rows) if rows else "(không có job nền nào)"
+    try:
+        jf = _job_file(int(str(pid).strip()))
+        with open(jf, encoding="utf-8") as f:
+            j = json.load(f)
+    except Exception:
+        return f"[LOI] không có job {pid} (dùng bash_poll list để xem)"
+    if act == "kill":
+        try:
+            import signal
+            os.kill(int(j["pid"]), signal.SIGTERM)
+            time.sleep(0.5)
+            if _job_alive(j["pid"]):
+                os.kill(int(j["pid"]), signal.SIGKILL)
+            return f"Đã dừng job {j['pid']}."
+        except Exception as e:
+            return f"[LOI] không dừng được job {pid}: {e}"
+    # poll
+    alive = _job_alive(j["pid"])
+    try:
+        with open(j.get("out", ""), encoding="utf-8", errors="replace") as f:
+            out = f.read()[-MAX_TOOL_OUT:]
+    except Exception:
+        out = ""
+    try:
+        with open(j.get("err", ""), encoding="utf-8", errors="replace") as f:
+            err = f.read()[-500:]
+    except Exception:
+        err = ""
+    tail = (out + ("\n[STDERR]\n" + err if err.strip() else "")).strip() or "(chưa có output)"
+    return f"Job {j['pid']} [{'ĐANG CHẠY' if alive else 'ĐÃ XONG'}] — {j.get('cmd', '')[:120]}\n{tail}"
+
+
 def bash(command, timeout=SHELL_TIMEOUT):
     low = (command or "").strip().lower()
     for d in DANGER:
         if d in low:
             return f"[TU CHOI] lệnh nguy hiểm bị chặn: {d}"
+    try:
+        timeout = max(1, min(int(timeout or SHELL_TIMEOUT), 600))
+    except Exception:
+        timeout = SHELL_TIMEOUT
     # Chạy qua FILE thay vì pipe: subprocess.run với capture_output=True sẽ HANG mãi
     # khi lệnh spawn tiến trình nền (`cmd &`) — tiến trình con giữ pipe stdout mở nên
     # run() chờ EOF không bao giờ tới. redirect ra file thì shell thoát là run() trả về
@@ -277,8 +367,22 @@ def bash(command, timeout=SHELL_TIMEOUT):
             except Exception:
                 pass
     if code == "timeout":
-        tail = (out + "\n[STDERR]\n" + err)[-MAX_TOOL_OUT:] if (out or err) else ""
-        return f"[LOI] timeout quá {timeout}s — lệnh nền giữ màn hình không thoát?\n{tail}".strip()
+        # CHỐNG KẸT TRIỆT ĐỂ: lệnh dài không giết — chuyển chạy nền, agent poll tiếp.
+        import tempfile as _tf
+        _fo = _tf.NamedTemporaryFile("w", encoding="utf-8", suffix=".out", delete=False)
+        _fe = _tf.NamedTemporaryFile("w", encoding="utf-8", suffix=".err", delete=False)
+        _fo.close(); _fe.close()
+        try:
+            p = subprocess.Popen(["bash", "-c", command], cwd=CWD[0],
+                                 stdin=subprocess.DEVNULL,
+                                 stdout=open(_fo.name, "w"), stderr=open(_fe.name, "w"),
+                                 start_new_session=True)
+            _job_save(p.pid, command, _fo.name, _fe.name)
+            part = (out + "\n[STDERR]\n" + err)[-500:] if (out or err) else ""
+            return (f"[CHẠY NỀN] lệnh quá {timeout}s nên đã chuyển chạy nền (job {p.pid}). "
+                    f"CẤM chạy lại lệnh này — dùng bash_poll(pid='{p.pid}') để xem tiến độ/kết quả.\n{part}").strip()
+        except Exception as e:
+            return f"[LOI] timeout quá {timeout}s và không chuyển nền được: {e}"
     if err:
         out += "\n[STDERR]\n" + err
     return clamp(out.strip() or "(không có output)", MAX_TOOL_OUT)
@@ -656,8 +760,14 @@ def task(description, session_id=""):
 # ── tools table ──────────────────────────────────────────────────────────────
 
 TOOLS = [
-    Tool("bash", "Chạy lệnh shell/terminal (bash -c). Dùng cho hầu hết việc: xem RAM, disk, git, pip...",
-         schema({"command": {"type": "string", "description": "Lệnh shell cần chạy"}}), bash),
+    Tool("bash", "Chạy lệnh shell/terminal (bash -c). Lệnh quá timeout TỰ chuyển chạy nền → dùng bash_poll xem tiếp. "
+          "CẤM chạy lại lệnh vừa bị chuyển nền.",
+          schema({"command": {"type": "string", "description": "Lệnh shell cần chạy"},
+                  "timeout": {"type": "integer", "description": "giới hạn giây (1-600, mặc định 60)"}}), bash),
+    Tool("bash_poll", "Xem/giết job bash chạy nền (job tự tạo khi bash timeout). "
+          "poll = trạng thái + output; kill = dừng; list = liệt kê.",
+          schema({"pid": {"type": "string", "description": "id job (bỏ trống + action=list để liệt kê)"},
+                  "action": {"type": "string", "description": "poll|kill|list"}}), bash_poll),
     Tool("read_file",
          "Đọc nội dung file văn bản. Hiện line numbers tự động. "
          "Dùng offset/limit để đọc phần cụ thể (dòng 1-indexed). "
