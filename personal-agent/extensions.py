@@ -136,8 +136,11 @@ class Manager:
         self.extensions = [Extension(**s) for s in base]
 
     def start_all(self):
-        for e in self.extensions:
-            e.start()
+        # Khởi động song song (trước đây nối tiếp ~6s). Mỗi extension chỉ chạm
+        # tiến trình/log/tools của riêng nó; tool_map tính lại sau nên không race.
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=min(len(self.extensions), 10)) as _ex:
+            list(_ex.map(Extension.start, self.extensions))
 
     def reload_external(self):
         """(Re)start các MCP server ngoài theo mcp.json; giữ nguyên extension nội."""
