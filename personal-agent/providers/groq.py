@@ -314,7 +314,7 @@ class KeyManager:
             "last_ok": 0.0, "last_fail": 0.0,
             "cooldown_until": 0.0, "cooldown_reason": "",
             "circuit_failures": 0, "circuit_open": False,
-            "rate_streak": 0,
+            "rate_streak": 0, "auth_fails": 0, "auth_dead": False,
         })
         return s
 
@@ -364,6 +364,8 @@ class KeyManager:
             for i in range(len(available_keys)):
                 k = available_keys[(self._rr + i) % len(available_keys)]
                 s = self._get_stats(k)
+                if s.get("auth_dead"):
+                    continue  # key chết xác thực (401/403 lặp) → cách ly, không chọn
                 if s["circuit_open"]:
                     if now - s["last_fail"] < self._CIRCUIT_RECOVERY:
                         continue
@@ -381,17 +383,26 @@ class KeyManager:
                 choice = healthy[0]
                 self._rr = (self._rr + 1) % len(available_keys)
                 return choice, 0
-            # không key khỏe → chọn key có cooldown ngắn nhất (hoặc RPM thấp nhất)
+            # không key khỏe → chọn key có cooldown ngắn nhất (ưu tiên key không chết auth;
+            # chỉ dùng key auth_dead khi toàn bộ pool đều chết)
             best_wait = float("inf")
             best_key = None
+            dead_wait = float("inf")
+            dead_key = None
             for k in available_keys:
                 s = self._get_stats(k)
                 if s["circuit_open"] and now - s["last_fail"] < self._CIRCUIT_RECOVERY:
                     continue
                 wait = max(0, s["cooldown_until"] - now)
-                if wait < best_wait:
+                if s.get("auth_dead"):
+                    if wait < dead_wait:
+                        dead_wait = wait
+                        dead_key = k
+                elif wait < best_wait:
                     best_wait = wait
                     best_key = k
+            if best_key is None:
+                best_key, best_wait = dead_key, dead_wait
             if best_key is None:
                 best_score = float("inf")
                 for k in available_keys:
@@ -409,6 +420,11 @@ class KeyManager:
             s["circuit_failures"] = max(0, s["circuit_failures"] - 1)
             s["rate_streak"] = 0
             s["cooldown_reason"] = ""
+            # key vừa thành công → cooldown cũ đã lỗi thời, mở khóa ngay
+            # (trước đây success không xóa cooldown_until nên key khỏe vẫn bị cấm oan)
+            s["cooldown_until"] = 0.0
+            s["auth_dead"] = False
+            s["auth_fails"] = 0
             now = time.time()
             h = self._get_hist(key)
             h.append(now)          # token-bucket ghi nhận request thành công
@@ -430,9 +446,14 @@ class KeyManager:
                 s["cooldown_until"] = time.time() + self._EXHAUST_COOLDOWN
                 s["cooldown_reason"] = "exhausted"
                 s["rate_streak"] = 0
-            elif s["rate_streak"] >= 1:
+            elif s["rate_streak"] >= 2:
                 s["cooldown_until"] = time.time() + min(base + s["rate_streak"] * self._COOLDOWN_SCALE, self._COOLDOWN_MAX)
                 s["cooldown_reason"] = f"rate streak={s['rate_streak']}"
+            else:
+                # 429 lẻ tẻ (streak 1) → chỉ nghỉ ngắn, tránh cấm oan cả phút
+                # (trước đây 1 phát 429 đã cooldown 50-110s, cả pool cùng dính)
+                s["cooldown_until"] = time.time() + (ra if ra else 10.0)
+                s["cooldown_reason"] = "rate 1 lần"
         self._save()
 
     def report_failure(self, key, is_network=False, is_server=False):
@@ -455,6 +476,11 @@ class KeyManager:
             s["last_fail"] = time.time()
             s["cooldown_until"] = time.time() + self._AUTH_COOLDOWN
             s["cooldown_reason"] = "auth"
+            # 401/403 lặp ≥2 lần → key chết thật (sai key/hết quyền) → cách ly khỏi vòng xoay
+            # (report_success sẽ gỡ cách ly nếu key sống lại)
+            s["auth_fails"] = s.get("auth_fails", 0) + 1
+            if s["auth_fails"] >= 2:
+                s["auth_dead"] = True
         self._save()
 
     def all_cooldown(self, available_keys):
@@ -467,7 +493,7 @@ class KeyManager:
         with self._lock:
             lines = []
             for k, s in sorted(self._stats.items(), key=lambda x: -x[1]["success"]):
-                status = "OPEN" if s["circuit_open"] else ("CD" if s["cooldown_until"] > now else "OK")
+                status = "DEAD" if s.get("auth_dead") else ("OPEN" if s["circuit_open"] else ("CD" if s["cooldown_until"] > now else "OK"))
                 r = s.get("cooldown_reason") or ""
                 lines.append(f"  {k[:14]}... {status:3} ok={s['success']} fail={s['fail']} "
                              f"rate={s['rate']} net={s['net']}" + (f" [{r}]" if r else ""))
