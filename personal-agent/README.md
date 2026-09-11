@@ -2,7 +2,7 @@
 
 Personal AI agent chạy 100% trên **Groq** — kiến trúc **MCP-native** theo mô hình của **goose (Block)** và **opencode**: mọi công cụ là MCP extension, mỗi extension chạy trong một tiến trình riêng nói chuyện qua JSON-RPC/stdio. Hoạt động trên **Termux (Android)** và **PC/Linux**.
 
-> v3.27: **PPTX chuẩn** — tạo bài thuyết trình PowerPoint đúng chuẩn OOXML (mẫu: `examples/presentations/bai_thuyet_trinh_moi_truong.py`), `requirements.txt` + `install.sh` tự cài python-pptx (kèm fallback lxml trên ARM/Termux). Trước đó v3.26: **Desktop Linux** (`desktop_linux` — điều khiển desktop qua AT-SPI, không cần screenshot: dl_tree/click/type/key/mouse/clipboard) + gpt-oss-120b làm model chat + **auto-resume** khi dừng giữa chừng (quota/time/lỗi) + headless mode `Remtm run "<task>"`. v3.26.1: gpt-oss `reasoning_effort=low` cho phản hồi nhanh hơn. V3.25: **Subagent** (`task` — agent con chạy độc lập kiểu opencode Task, đủ tool riêng + session riêng), **MCP server ngoài** qua `~/.rem_ai/mcp.json` (stdio, có `/mcp` `/mcp reload`), **`/init`** sinh `AGENTS.md`. V3.24: **LSP** (clangd/pylsp: diagnostics/definition/references/symbols/hover) + `/lsp <file>`.
+> v3.42: **2 luồng làm–nghe** — gõ lệnh giữa chừng lái trực tiếp việc đang chạy (inject live, prompt 📥), status bar kiểu opencode. v3.40: **`/list`** liệt kê macro/skill/chat cũ chọn số để mở (`/play` phát macro, `/resume` mở chat cũ, `/rec` ghi macro). v3.37: **macro recorder** — ghi thao tác desktop (click/gõ/phím) phân mục công việc rồi `rec_play` phát lại + **định tuyến module** tự chọn tool theo việc + **bash nền** (lệnh dài tự chuyển nền, `bash_poll` xem tiếp). v3.36: **diff cũ/mới kiểu opencode** sau mỗi lần sửa (màn hình rộng = 2 cột CŨ|MỚI). v3.33–v3.35: header box, prompt ❯, fix BrokenPipe log + `pip_install` alias. Trước đó v3.27: **PPTX chuẩn**; v3.26: **Desktop Linux** + auto-resume; v3.25: **Subagent** + MCP ngoài + `/init`; v3.24: **LSP**.
 
 ## Kiến trúc (mô phỏng goose/opencode)
 
@@ -15,10 +15,16 @@ agentloop.py ── Agent loop: LLM → tool_calls → execute → lặp
    │
 extensions.py ── ExtensionManager: khám phá & gọi tool, tự restart khi mất kết nối
    │
-   ├── mcp_servers/developer  (14 tool)  bash, read/write/edit file, grep, glob, cwd, ensure_tool, pip_install, todo_list/todo_write, apply_patch...
-   ├── mcp_servers/webtool    (3 tool)  web_search, web_fetch, github_api
-   ├── mcp_servers/memory     (2 tool)  remember, recall (graph.json)
-   └── mcp_servers/lsp        (6 tool)  lsp_diagnostics, lsp_definition, lsp_references, lsp_symbols, lsp_hover, lsp_supported (clangd/pylsp)
+    ├── mcp_servers/developer  (16 tool)  bash (+bash_poll job nền), read/write/edit file (hiện diff kiểu opencode), grep, glob, cwd, ensure_tool, pip_install, todo, apply_patch...
+    ├── mcp_servers/webtool    (3 tool)  web_search, web_fetch, github_api
+    ├── mcp_servers/memory     (2 tool)  remember, recall (graph.json)
+    ├── mcp_servers/skills     (4 tool)  skill_save/find/use/list (tự học quy trình)
+    ├── mcp_servers/experience (5 tool)  bài học lỗi + procedural skills
+    ├── mcp_servers/lsp        (6 tool)  lsp_diagnostics, lsp_definition, lsp_references, lsp_symbols, lsp_hover, lsp_supported (clangd/pylsp)
+    ├── mcp_servers/desktop_linux (16 tool)  dl_tree/click/type/key/mouse/clipboard + macro recorder rec_start/stop/list/show/play/delete (phân mục công việc)
+    ├── mcp_servers/browser_auto  (15 tool)  trình duyệt Playwright: mở trang, click, gõ, screenshot, đọc nội dung
+    ├── mcp_servers/media_tools   (12 tool)  TTS tiếng Việt, ảnh AI, ghép video Shorts, cắt/nối/đổi cỡ
+    └── mcp_servers/social_auto   (4 tool)  tự động mạng xã hội 24/7
 mcplib.py  ── Client/Server MCP over stdio (chuẩn MCP, chỉ dùng stdlib, không cần Rust)
 providers/groq.py ── Groq API + xoay vòng nhiều key + tự chọn model tồn tại + native tool_calls
 ```
@@ -62,6 +68,8 @@ Key lưu trong `~/.rem_ai/rem.db`.
 
 ## Lệnh REPL
 ```text
+/list    liệt kê macro/skill/chat cũ (gõ số để mở); /play <số> phát macro; /resume <số> mở chat cũ
+/rec     ghi thao tác desktop thành macro; /done dừng ghi & lưu
 /status    danh sách extension + tool + session
 /models    model đang dùng cho chat / compact
 /sessions  liệt kê session cũ
