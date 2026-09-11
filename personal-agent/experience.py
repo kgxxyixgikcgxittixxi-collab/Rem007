@@ -46,8 +46,12 @@ def _load_lessons():
 
 
 def _save_lessons(data):
-    with open(_LESSONS_FILE, "w") as f:
+    # Ghi atomic (tmp + replace): nhiều tiến trình Remtm/MCP cùng viết file này,
+    # ghi trực tiếp dễ rách file/mất cập nhật khi crash giữa chừng.
+    tmp = _LESSONS_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _LESSONS_FILE)
 
 
 def record_lesson(task, error, critique, lesson, tags=None, outcome="failure"):
@@ -171,18 +175,23 @@ def recall_lessons(query="", tags=None, limit=MAX_LESSONS_IN_PROMPT, touch=True)
     # Format compact — mỗi lesson ~100 token
     out = []
     for l in top:
-        if touch:
-            l["last_accessed"] = datetime.now().isoformat()
-            l["times_recalled"] = l.get("times_recalled", 0) + 1
-            # Boost stability when recalled
-            l["stability"] = min(1.0, l.get("stability", 0.5) + STABILITY_BOOST * 0.1)
-
         tags_str = ", ".join(l.get("tags", []))[:40]
         out.append(f"[L{l['id']}] {l['lesson'][:100]} | tags: {tags_str}")
 
-    # Save updated recall counts
+    # Ghi nhận recall: nạp mới theo id DƯỚI KHÓA (tránh mất cập nhật khi nhiều
+    # tiến trình cùng chạm — trước đây đọc/sửa/lưu ngoài khóa nên ghi đè nhau)
     if touch:
-        _save_lessons(data)
+        with _lock:
+            data2 = _load_lessons()
+            by_id = {x.get("id"): x for x in data2.get("lessons", [])}
+            for l in top:
+                cur = by_id.get(l.get("id"))
+                if cur is None:
+                    continue
+                cur["last_accessed"] = datetime.now().isoformat()
+                cur["times_recalled"] = cur.get("times_recalled", 0) + 1
+                cur["stability"] = min(1.0, cur.get("stability", 0.5) + STABILITY_BOOST * 0.1)
+            _save_lessons(data2)
     return "\n".join(out)
 
 
@@ -215,14 +224,23 @@ def _load_skills():
 
 
 def _save_skills(data):
-    with open(_SKILLS_FILE, "w") as f:
+    tmp = _SKILLS_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _SKILLS_FILE)
 
 
 def record_skill(task_type, strategy, result, tags=""):
     """Ghi 1 procedural skill: chiến lược nào thành công cho task_type."""
     with _lock:
         data = _load_skills()
+        # Dedup: cùng task_type + strategy → chỉ tăng times_used (trước đây mỗi
+        # task thành công tạo 1 bản trùng, file phình vô hạn với toàn "general")
+        for s in data.get("skills", []):
+            if s.get("task_type") == (task_type or "")[:80] and s.get("strategy") == (strategy or "")[:200]:
+                s["times_used"] = s.get("times_used", 0) + 1
+                _save_skills(data)
+                return f"Skill #{s['id']} reused (dùng lần {s['times_used']})"
         skill_id = data["next_id"]
         data["next_id"] += 1
         
@@ -260,26 +278,25 @@ def find_best_skill(task_type, tags=None):
         return None
     
     # Sort by success_rate
-    candidates.sort(key=lambda x: x["success_rate"], reverse=True)
+    candidates.sort(key=lambda x: x.get("success_rate", 0.5), reverse=True)
     best = candidates[0]
-    
-    # Update recall
-    best["times_used"] += 1
-    _save_skills(data)
-    
-    return f"[S{best['id']}] {best['strategy'][:100]} (success_rate: {best['success_rate']:.1f})"
+
+    # Chỉ đọc, KHÔNG tăng times_used ở đây (trước đây mỗi lần tra cứu cũng tính
+    # là "dùng" làm số liệu phình; việc dùng thật do update_skill_result ghi nhận)
+    return f"[S{best['id']}] {best['strategy'][:100]} (success_rate: {best.get('success_rate', 0.5):.1f})"
 
 
 def update_skill_result(skill_id, success):
-    """Update skill success rate after using it."""
+    """Ghi nhận kết quả dùng skill (Laplace smoothing), CÓ lưu file.
+    (Trước đây hàm này tính sai công thức VÀ quên save nên success_rate đứng yên.)"""
     with _lock:
         data = _load_skills()
-        for s in data["skills"]:
-            if s["id"] == skill_id:
-                # Bayesian update: Laplace smoothing
-                total = s["times_used"] + 2
-                successes = sum(1 for _ in range(s["times_used"])) + (1 if success else 0)
-                s["success_rate"] = (successes + 1) / total
+        for s in data.get("skills", []):
+            if s.get("id") == skill_id:
+                s["successes"] = s.get("successes", 0) + (1 if success else 0)
+                s["times_used"] = s.get("times_used", 0) + 1
+                s["success_rate"] = (s["successes"] + 1) / (s["times_used"] + 2)
+                _save_skills(data)
                 return s["success_rate"]
     return None
 
