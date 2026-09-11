@@ -240,6 +240,28 @@ class Agent:
         except Exception:
             pass
 
+    def _finish(self, user_text, out):
+        """MỌI đường kết thúc task đều qua đây — agent LUÔN tự học:
+        - Thành công (text thường) → lưu skill + procedural skill.
+        - Thất bại/timeout/quota (text bắt đầu bằng [) → lưu lesson.
+        - User chủ động dừng → không học. Không bao giờ raise."""
+        try:
+            if not out or out == "(rỗng)":
+                return out
+            low = out.lower()
+            if "theo yêu cầu" in low or "theo yeu cau" in low:
+                return out
+            if out.startswith("["):
+                import experience as _exp
+                _exp.auto_learn(user_text, self._last_steps, False, error_msg=out[:300])
+            else:
+                self._auto_save_skill(user_text, self._last_steps)
+                import experience as _exp
+                _exp.auto_learn(user_text, self._last_steps, True)
+        except Exception:
+            pass
+        return out
+
     def _should_self_heal(self, error_msg):
         """Check if we've seen this error before and should try alternative approach."""
         pattern = (error_msg or "")[:80]
@@ -277,7 +299,7 @@ class Agent:
         for turn in range(1, MAX_TURNS + 1):
             stopped = self._check_stop(deadline)
             if stopped:
-                return stopped
+                return self._finish(user_text, stopped)
             msgs = [_sys(self.manager, self.sid, self._cwd()), *sessions.load(self.sid)]
             if turn > 1:
                 self._emit({"type": "turn", "turn": turn})
@@ -293,7 +315,7 @@ class Agent:
             for step in range(MAX_STEPS):
                 stopped = self._check_stop(deadline)
                 if stopped:
-                    return stopped
+                    return self._finish(user_text, stopped)
                 self._emit({"type": "thinking", "step": step + 1, "turn": turn})
                 msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline))
                 msgs = sessions.trim(msgs)
@@ -303,7 +325,7 @@ class Agent:
                 for retry_i in range(5):
                     stopped = self._check_stop(deadline)
                     if stopped:
-                        return stopped
+                        return self._finish(user_text, stopped)
                     reply = groq.chat_stream(
                         msgs, tools=self.manager.schemas() or None,
                         budget=_budget(deadline, step_deadline),
@@ -323,7 +345,7 @@ class Agent:
                         else:
                             self._emit({"type": "retry", "attempt": retry_i + 1})
                     if self.cancel.wait(min(2 * (retry_i + 1), 12)):
-                        return "[DUNG] theo yeu cau cua nguoi dung."
+                        return self._finish(user_text, "[DUNG] theo yeu cau cua nguoi dung.")
                 if not reply:
                     if time.time() < deadline - 5:
                         try:
@@ -333,13 +355,7 @@ class Agent:
                             pass
                         time.sleep(1)
                         continue
-                    try:
-                        import experience as _exp
-                        _exp.auto_learn(user_text, self._last_steps, False,
-                                        error_msg="Groq rate limit / quota hết sau nhiều lần xoay key")
-                    except Exception:
-                        pass
-                    return "[TAM DUNG] Groq dang qua tai/quota het — het thoi gian luot nay, cong viec chua xong. Go 'tiep tuc' de chay not doan con dang do."
+                    return self._finish(user_text, "[TAM DUNG] Groq dang qua tai/quota het — het thoi gian luot nay, cong viec chua xong. Go 'tiep tuc' de chay not doan con dang do.")
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
                     if turn > 1:
@@ -347,13 +363,7 @@ class Agent:
                     else:
                         content = reply.get("content") or "(rỗng)"
                     sessions.append(self.sid, {"role": "assistant", "content": content})
-                    self._auto_save_skill(user_text, self._last_steps)
-                    try:
-                        import experience as _exp
-                        _exp.auto_learn(user_text, self._last_steps, True)
-                    except Exception:
-                        pass
-                    return content
+                    return self._finish(user_text, content)
                 sessions.append(
                     self.sid,
                     {
@@ -372,7 +382,7 @@ class Agent:
                 for tc in tool_calls:
                     stopped = self._check_stop(deadline)
                     if stopped:
-                        return stopped
+                        return self._finish(user_text, stopped)
                     fn = tc.get("function") or {}
                     name = fn.get("name", "?")
                     try:
@@ -393,13 +403,7 @@ class Agent:
                         try:
                             budget = max(1, int(deadline - time.time()))
                             if budget <= 0:
-                                try:
-                                    import experience as _exp
-                                    _exp.auto_learn(user_text, self._last_steps, False,
-                                                    error_msg="Hết thời gian chống treo của lượt")
-                                except Exception:
-                                    pass
-                                return "[ĐÃ DỪNG] hết thời gian chống treo của lượt này."
+                                return self._finish(user_text, "[ĐÃ DỪNG] hết thời gian chống treo của lượt này.")
                             if name in ("pip_install", "ensure_tool", "task"):
                                 to = min(config.TOOL_TIMEOUT_PKG, budget)
                             else:
@@ -443,7 +447,7 @@ class Agent:
                     except Exception:
                         pass
             self._emit({"type": "turn_roll", "turn": turn})
-        return "[DUNG] đã tới giới hạn tổng số bước. Gõ 'tiếp tục' nếu muốn chạy thêm nữa."
+        return self._finish(user_text, "[DUNG] đã tới giới hạn tổng số bước. Gõ 'tiếp tục' nếu muốn chạy thêm nữa.")
 
     def say(self, text):
         sessions.append(self.sid, {"role": "assistant", "content": text})
