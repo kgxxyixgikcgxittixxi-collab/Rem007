@@ -388,6 +388,20 @@ class Repl:
                         break
                 if auto_runs >= AUTO_RESUME_MAX:
                     _p(f"Đã tự chạy tiếp {AUTO_RESUME_MAX} lần chưa xong — nếu vẫn kẹt hãy báo lại bằng /stop.", "ye")
+                # CHỈ ĐẠO TỒN: lệnh gõ đúng lúc agent vừa xong bước cuối → làm tiếp luôn
+                for _ in range(3):
+                    try:
+                        _left = self._agent._drain_notes()
+                    except Exception:
+                        _left = []
+                    if not _left:
+                        break
+                    _p(f"[live] còn {len(_left)} chỉ đạo giữa chừng — làm tiếp...", "dim")
+                    try:
+                        out = self._agent.run("[CHỈ ĐẠO GIỮA CHỪNG — điều chỉnh việc đang làm theo yêu cầu mới, không làm lại từ đầu]\n" + "\n".join(_left))
+                    except Exception as e:
+                        out = f"[LỖI] {type(e).__name__}: {e}"
+                        break
                 self._last_out = out
                 self._spin_on = False
                 self._busy = False
@@ -892,16 +906,35 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         print(C["dim"] + bot + C["reset"])
 
     def _footer_hints(self):
-        _p("/list danh mục · /new chat mới · /stop dừng · /exit thoát", "dim")
+        # Status bar kiểu opencode: gợi ý trái, thư mục + version phải
+        try:
+            tw = render.term_width()
+        except Exception:
+            tw = 90
+        left = "/list · /new · /stop · /exit"
+        try:
+            right = f"{os.path.basename(os.getcwd())} · v{config.VERSION}"
+        except Exception:
+            right = ""
+        try:
+            pad = max(2, tw - render.disp_len(left) - render.disp_len(right))
+        except Exception:
+            pad = 4
+        print(C["dim"] + left + " " * pad + right + C["reset"], flush=True)
 
     def _prompt_hint(self):
-        # Opencode-style prompt: dấu ❯ nổi bật + ⏺ khi đang ghi macro
+        # Opencode-style prompt: dấu ❯ nổi bật + ⏺ khi đang ghi macro + 📥 chỉ đạo chờ
+        try:
+            lv = self._agent.live_count()
+        except Exception:
+            lv = 0
         rec = (C["rd"] + "⏺REC " + C["reset"]) if self.rec_mode else ""
+        live = (C["ye"] + f"📥{lv} " + C["reset"]) if lv else ""
         if self._busy:
-            return rec + C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
+            return rec + live + C["dim"] + "⏳ " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
         if self._pending:
-            return rec + C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
-        return rec + C["bold"] + C["cy"] + "❯ " + C["reset"]
+            return rec + live + C["dim"] + f"⏳({self._pending}) " + C["reset"] + C["bold"] + C["cy"] + "❯ " + C["reset"]
+        return rec + live + C["bold"] + C["cy"] + "❯ " + C["reset"]
 
     def run(self):
         self._clear()
@@ -964,12 +997,18 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 else:
                     _p("Gõ /list trước để xem danh sách rồi chọn số.", "dim")
                 continue
+            # HAI PHẦN: đang bận = luồng LÀM chạy, dòng gõ = luồng NGHE.
+            # Lệnh mới lái TRỰC TIẾP việc đang chạy (inject), không xếp hàng chờ.
+            if self._busy:
+                try:
+                    n = self._agent.inject(line)
+                except Exception:
+                    n = 0
+                _p(f"📥 Đã chuyển cho agent đang chạy ({n} chỉ đạo chờ) — nó điều chỉnh ngay trong lượt này.",
+                   "ye")
+                continue
             # Opencode-style: highlight user input, show as "User" block
             sys.stdout.write("\033[1A\r\033[2K")
             sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + line + C["reset"] + "\n")
             sys.stdout.flush()
-            if self._busy:
-                self._pending += 1
-                _p(f"⏳ Câu hỏi đã xếp hàng (#{self._pending}). Agent sẽ trả lời sau lượt hiện tại — gõ /stop để dừng.",
-                   "ye")
             self.q.put(("task", line))

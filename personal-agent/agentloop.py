@@ -262,6 +262,8 @@ class Agent:
         self._tool_fingerprints = set()  # track which tools have been called with what args
         self._task_hash = ""  # fingerprint of current task for resume
         self._last_steps = []  # (tool, args) đã dùng cho task hiện tại (để auto-save skill)
+        self.live_notes = []        # chỉ đạo gõ GIỮA CHỪNG khi task đang chạy (luồng nghe → luồng làm)
+        self._live_lock = threading.Lock()
 
     def _emit(self, ev):
         if self.on_event:
@@ -272,6 +274,33 @@ class Agent:
 
     def stop(self):
         self.cancel.set()
+
+    def inject(self, text):
+        """Luồng NGHE → luồng LÀM: nhận lệnh mới ngay cả khi task đang chạy.
+        Trả về số chỉ đạo đang chờ."""
+        try:
+            with self._live_lock:
+                t = str(text or "").strip()
+                if t:
+                    self.live_notes.append(t)
+                return len(self.live_notes)
+        except Exception:
+            return 0
+
+    def live_count(self):
+        try:
+            with self._live_lock:
+                return len(self.live_notes)
+        except Exception:
+            return 0
+
+    def _drain_notes(self):
+        try:
+            with self._live_lock:
+                notes, self.live_notes = self.live_notes, []
+                return [n for n in notes if n]
+        except Exception:
+            return []
 
     def _check_stop(self, deadline):
         if self.cancel.is_set():
@@ -387,6 +416,14 @@ class Agent:
                 stopped = self._check_stop(deadline)
                 if stopped:
                     return self._finish(user_text, stopped)
+                # CHỈ ĐẠO LIVE: lệnh gõ giữa chừng → chèn ngay vào lượt đang chạy,
+                # agent điều chỉnh việc đang làm, không làm lại từ đầu.
+                for _note in self._drain_notes():
+                    _nm = {"role": "user", "content": (
+                        "[CHỈ ĐẠO GIỮA CHỪNG — điều chỉnh việc đang làm theo yêu cầu mới, "
+                        "không làm lại từ đầu]\n" + _note)}
+                    sessions.append(self.sid, _nm)
+                    msgs.append(dict(_nm))
                 self._emit({"type": "thinking", "step": step + 1, "turn": turn})
                 msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline))
                 msgs = sessions.trim(msgs)
