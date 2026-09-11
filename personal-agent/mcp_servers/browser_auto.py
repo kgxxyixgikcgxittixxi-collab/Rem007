@@ -14,8 +14,23 @@ from config import TMP, DIR
 
 _BROWSER = None
 _PAGE = None
+_ERR = ""  # lỗi khởi động trình duyệt gần nhất (để trả về thay vì crash server)
 _OUT = os.path.join(TMP, "browser")
 os.makedirs(_OUT, exist_ok=True)
+
+
+def _need_page():
+    """Lấy page hoặc thông báo lỗi — KHÔNG bao giờ raise (raise ngoài try sẽ
+    giết cả MCP server, client treo tới timeout)."""
+    global _ERR
+    try:
+        p = _ensure()
+    except Exception as e:
+        _ERR = f"[LOI] không khởi động được trình duyệt: {type(e).__name__}: {e}"
+        return None
+    if p is None:
+        return None
+    return p
 
 
 def _ensure():
@@ -82,7 +97,9 @@ def browser_status():
 
 
 def browser_open(url):
-    page = _ensure()
+    page = _need_page()
+    if page is None:
+        return _ERR or '[LOI] trình duyệt chưa sẵn sàng'
     if not re.match(r"^https?://", url) and "." in url and " " not in url:
         url = "https://" + url
     try:
@@ -101,16 +118,19 @@ def browser_navigate(url):
 
 
 def browser_click(selector, index=0):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        els = _PAGE.locator(selector)
-        n = els.count() if _PAGE else 0
+        els = page.locator(selector)
+        n = els.count()
         if n == 0:
             return f"[LOI] Không tìm thấy phần tử: {selector}"
         i = min(max(0, int(index)), n - 1)
         els.nth(i).scroll_into_view_if_needed()
         els.nth(i).click()
-        _PAGE.wait_for_timeout(500)
-        return f"Đã click [{i}] {selector} (có {n} phần tử).\nURL: {_PAGE.url}"
+        page.wait_for_timeout(500)
+        return f"Đã click [{i}] {selector} (có {n} phần tử).\nURL: {page.url}"
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
 
@@ -208,7 +228,9 @@ def browser_scroll(direction="down", amount=600):
 
 
 def browser_search(q, n=5):
-    page = _ensure()
+    page = _need_page()
+    if page is None:
+        return _ERR or '[LOI] trình duyệt chưa sẵn sàng'
     try:
         page.goto("https://www.bing.com/search", wait_until="domcontentloaded")
         page.fill("#sb_form_q", q)
@@ -238,10 +260,13 @@ def browser_search(q, n=5):
 
 
 def browser_back():
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        _PAGE.go_back()
-        _PAGE.wait_for_timeout(500)
-        return f"Đã quay lại: {_PAGE.url}"
+        page.go_back()
+        page.wait_for_timeout(500)
+        return f"Đã quay lại: {page.url}"
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
 

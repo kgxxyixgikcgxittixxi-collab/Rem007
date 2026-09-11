@@ -42,8 +42,18 @@ def dur(path):
     try:
         out = subprocess.check_output([
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "csv=p=0", path]).decode().strip()
+            "-of", "csv=p=0", path], timeout=20).decode().strip()
         return float(out)
+    except Exception:
+        return 0.0
+
+
+def _fps(s):
+    """Parse '30000/1001' → float, an toàn (trước đây dùng eval)."""
+    try:
+        num, _, den = str(s).partition("/")
+        den = float(den) if den else 1.0
+        return float(num) / den if den else 0.0
     except Exception:
         return 0.0
 
@@ -67,7 +77,7 @@ def probe(path):
                 "size_bytes": fmt.get("size", 0), "format": fmt.get("format_name", "")}
         if v:
             info["video"] = {"codec": v.get("codec_name"), "width": v.get("width"),
-                             "height": v.get("height"), "fps": eval(v.get("r_frame_rate", "0/1")) if v.get("r_frame_rate") else None}
+                             "height": v.get("height"), "fps": _fps(v.get("r_frame_rate")) if v.get("r_frame_rate") else None}
         if a:
             info["audio"] = {"codec": a.get("codec_name"), "sample_rate": a.get("sample_rate")}
         return json.dumps(info, ensure_ascii=False, indent=1)
@@ -168,7 +178,7 @@ def media_image(prompt, out="", width=W, height=H):
             subprocess.run([
                 "ffmpeg", "-y", "-f", "lavfi", "-i",
                 f"gradients=s={width}x{height}:c0=0x1a2a6c:c1=0xb21f1f:c2=0xfdbb2d:n=3",
-                "-frames:v", "1", path], check=True, capture_output=True)
+                "-frames:v", "1", path], check=True, capture_output=True, timeout=120)
             return f"Fallback gradient: {path} (AI: {e})"
         except Exception as e2:
             return f"[LOI] {type(e2).__name__}: {e2}"
