@@ -82,10 +82,38 @@ def _venv_rollback(snapshot):
             pass
 
 
+# PyPI name → import name (một số gói tên pip khác tên import).
+# vd pip_install("python-pptx") phải verify bằng `import pptx`, không phải `import python-pptx`.
+IMPORT_ALIASES = {
+    "python-pptx": "pptx",
+    "pillow": "PIL",
+    "scikit-learn": "sklearn",
+    "opencv-python": "cv2",
+    "opencv-python-headless": "cv2",
+    "pyyaml": "yaml",
+    "python-dateutil": "dateutil",
+    "beautifulsoup4": "bs4",
+    "discord-py": "discord",
+    "flask-cors": "flask_cors",
+    "flask-socketio": "flask_socketio",
+    "python-telegram-bot": "telegram",
+    "pyjwt": "jwt",
+    "pymongo": "pymongo",
+    "sqlalchemy": "sqlalchemy",
+    "psycopg2-binary": "psycopg2",
+    "mysql-connector-python": "mysql.connector",
+    "google-api-python-client": "googleapiclient",
+    "python-dotenv": "dotenv",
+    "pygithub": "github",
+    "edge-tts": "edge_tts",
+}
+
+
 def _verify_import(pkg, py=None):
     py = py or sys.executable
+    mod = IMPORT_ALIASES.get(pkg.lower(), pkg.replace("-", "_"))
     try:
-        r = subprocess.run([py, "-c", f"import {pkg}"],
+        r = subprocess.run([py, "-c", f"import {mod}"],
                            capture_output=True, timeout=15)
         return r.returncode == 0
     except Exception:

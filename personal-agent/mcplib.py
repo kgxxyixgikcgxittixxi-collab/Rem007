@@ -20,6 +20,9 @@ def recv_msg(stream):
 
 
 def send_msg(stream, msg):
+    # BrokenPipe (client đóng kết nối) được để caller xử lý:
+    # - Server.serve: bắt và thoát lặng lẽ (không traceback).
+    # - Client.request: bắt và báo ConnectionError để auto-restart.
     stream.write(json.dumps(msg, ensure_ascii=False) + "\n")
     stream.flush()
 
@@ -116,7 +119,11 @@ class Server:
             except Exception as e:
                 resp["error"] = {"code": -32000, "message": repr(e)}
             if req.get("id") is not None:
-                send_msg(stdout, resp)
+                try:
+                    send_msg(stdout, resp)
+                except (BrokenPipeError, ConnectionResetError, ValueError, OSError):
+                    # Client đã đóng pipe (tắt agent / restart extension) → thoát lặng, không traceback.
+                    return
 
 
 class Client:
