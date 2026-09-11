@@ -408,6 +408,7 @@ def apply_patch(patch_text):
         except Exception as e:
             results.append(f"[LOI] {fpath}: {e}")
             continue
+        orig_text = "".join(orig_lines)
         # simple hunk apply
         new_content = []
         i = 0
@@ -436,7 +437,9 @@ def apply_patch(patch_text):
         with open(fpath, "w", encoding="utf-8") as f:
             f.write("".join(new_content))
         fmt = _auto_format(fpath)
-        results.append(f"[SỬA] {fpath} ({hunk_count} hunk){fmt}")
+        # Diff cũ/mới kiểu opencode: hiện cho người dùng thấy đã đổi gì
+        pdiff = _make_diff(orig_text, "".join(new_content), fpath)
+        results.append(f"[SỬA] {fpath} ({hunk_count} hunk){fmt}\n{pdiff}")
     return "\n".join(results)
 
 

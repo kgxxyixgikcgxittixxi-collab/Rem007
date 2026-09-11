@@ -212,6 +212,16 @@ class Repl:
             if len(self._tool_rows) > 14:
                 self._tool_rows.pop(0)
             _p("\r" + row, "gr" if ok else "rd")
+            # Diff cũ/mới kiểu opencode: hiện ngay dưới dòng ✓ khi sửa/tạo file
+            if ok and ev.get("name") in ("edit_file", "write_file", "apply_patch") and ev.get("full"):
+                try:
+                    d = render.diff_to_ansi(ev.get("full"))
+                except Exception:
+                    d = ""
+                if d:
+                    _p("  " + C["dim"] + "─ diff ─" + C["reset"], "dim")
+                    for dln in d.split("\n"):
+                        _p("  " + dln, "")
         elif t == "thinking":
             self._set_status("đang suy luận")
         elif t == "llm":

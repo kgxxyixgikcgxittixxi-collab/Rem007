@@ -437,7 +437,10 @@ class Agent:
                                 )
                             except Exception:
                                 pass
-                    self._emit({"type": "tool_done", "name": name, "result": str(result)[:200]})
+                    # Diff cũ/mới kiểu opencode: gửi kèm kết quả đầy đủ của tool sửa file
+                    # để REPL vẽ diff inline (event result vẫn cắt gọn như cũ).
+                    _full = result if name in ("edit_file", "write_file", "apply_patch") else ""
+                    self._emit({"type": "tool_done", "name": name, "result": str(result)[:200], "full": _full})
                     sessions.append(
                         self.sid,
                         {"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": result},

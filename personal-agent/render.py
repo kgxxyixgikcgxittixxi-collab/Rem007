@@ -298,6 +298,59 @@ def md_to_ansi(text, tw=None):
     return "\n".join(out)
 
 
+def diff_to_ansi(text, max_lines=40):
+    """Vẽ unified diff kiểu opencode: ---/+++ đậm, @@ cyan, dòng - đỏ, + xanh lá.
+    Nhận kết quả tool sửa file (có lẫn dòng trạng thái) → chỉ lấy phần diff.
+    Trả về '' nếu không tìm thấy dòng diff nào."""
+    if not text:
+        return ""
+    dl = []
+    for ln in str(text).split("\n"):
+        if ln.startswith(("--- ", "+++ ", "@@", "+", "-", " ")):
+            # dòng trạng thái ("Đã sửa xong...") không bắt đầu bằng các dấu này
+            # (trừ dòng "+..." hiếm) — lọc thêm bên dưới
+            dl.append(ln)
+        elif ln.startswith("---") or ln.startswith("+++"):
+            dl.append(ln)
+    # bỏ dòng trạng thái lọt vào (không phải diff thật)
+    diff_lines = [ln for ln in dl if ln.startswith(("---", "+++", "@@", "+", "-", " "))]
+    # giữ từ header --- đầu tiên để bỏ status line
+    start = 0
+    for i, ln in enumerate(diff_lines):
+        if ln.startswith("---"):
+            start = i
+            break
+    else:
+        # không có header --- : chỉ giữ các dòng +/- thuần (bỏ context " ")
+        diff_lines = [ln for ln in diff_lines if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))]
+        if not diff_lines:
+            return ""
+        start = 0
+    diff_lines = diff_lines[start:]
+    if not diff_lines:
+        return ""
+    out = []
+    for ln in diff_lines[:max_lines]:
+        if ln.startswith("---") or ln.startswith("+++"):
+            out.append(BOLD + ln[:200] + RESET)
+        elif ln.startswith("@@"):
+            out.append(CY + ln[:200] + RESET)
+        elif ln.startswith("+"):
+            out.append(GR + ln[:200] + RESET)
+        elif ln.startswith("-"):
+            out.append(RD + ln[:200] + RESET)
+        else:
+            out.append(DIM + ln[:200] + RESET)
+    rest = len(diff_lines) - max_lines
+    if rest > 0:
+        out.append(DIM + f"... (còn {rest} dòng diff nữa)" + RESET)
+    # thống kê +n -n kiểu opencode
+    adds = sum(1 for ln in diff_lines if ln.startswith("+") and not ln.startswith("+++"))
+    dels = sum(1 for ln in diff_lines if ln.startswith("-") and not ln.startswith("---"))
+    out.append(DIM + f"({GR}+{adds}{RESET}{DIM} {RD}-{dels}{RESET}{DIM})" + RESET)
+    return "\n".join(out)
+
+
 def thinking_to_ansi(text, tw=None, full=False):
     """Khối 'Đã suy luận' MỜ kiểu opencode. Mặc định CUỘN GỌN 1 dòng (như chế độ hide),
     chỉ hiển thị vài dòng tóm tắt; full=True in toàn bộ (dùng khối /think)."""
