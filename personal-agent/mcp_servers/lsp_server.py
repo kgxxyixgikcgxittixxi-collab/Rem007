@@ -347,7 +347,30 @@ def _lang_id(lang):
 
 # ---- Trạng thái client (cache theo thư mục + ngôn ngữ) ----
 _lock = threading.Lock()
-_clients = {}  # (cwd, lang) -> LSPClient
+_clients = {}  # (cwd, lang) -> [LSPClient, last_used]
+_MAX_CLIENTS = 4  # quá số này → đuổi client lâu không dùng (trước đây mở bao nhiêu
+# clangd/pylsp cũng sống mãi → rò rỉ tiến trình khi làm nhiều thư mục)
+
+
+def _client_touch(key, cl):
+    """Ghi nhận dùng client; trả về client bị đuổi (đóng NGOÀI khóa để khỏi kẹt)."""
+    _clients[key] = [cl, time.time()]
+    victim = None
+    while len(_clients) > _MAX_CLIENTS:
+        old = min(_clients, key=lambda k: _clients[k][1])
+        if old == key:
+            break
+        victim = _clients.pop(old, [None])[0]
+        break
+    return victim
+
+
+def _close_quiet(cl):
+    try:
+        if cl is not None:
+            cl.close()
+    except Exception:
+        pass
 
 
 def _client_for(path, cwd):
@@ -357,14 +380,26 @@ def _client_for(path, cwd):
         return None, f"(chưa hỗ trợ loại file này: {ext or '(không có đuôi)'}. Hỗ trợ: {', '.join(sorted(set(_EXT_TO_LANG.values())))} )"
     key = (cwd, lang)
     with _lock:
-        cl = _clients.get(key)
-        if cl is None:
-            try:
-                cl = LSPClient(lang, cwd=cwd)
-            except Exception as e:
-                return None, f"[LOI] không khởi động được LSP '{lang}': {type(e).__name__}: {e}"
-            _clients[key] = cl
+        hit = _clients.get(key)
+        if hit is not None:
+            hit[1] = time.time()
+            return hit[0], None
+        try:
+            cl = LSPClient(lang, cwd=cwd)
+        except Exception as e:
+            return None, f"[LOI] không khởi động được LSP '{lang}': {type(e).__name__}: {e}"
+        victim = _client_touch(key, cl)
+    _close_quiet(victim)
     return cl, None
+
+
+def _int(v, default):
+    """Ép số dòng/cột an toàn (LLM có thể gửi chuỗi)."""
+    try:
+        v = int(v)
+        return v if v > 0 else default
+    except Exception:
+        return default
 
 
 def _resolve(file, root="."):
@@ -392,20 +427,25 @@ def lsp_diagnostics(file, root="."):
     path = _resolve(file, root)
     if not os.path.isfile(path):
         return f"[LOI] file không tồn tại: {path}"
+    # Python: kiểm tra cú pháp bằng ast TRƯỚC (không cần LSP vẫn bắt được lỗi).
+    # Trước đây thiếu pylsp là trả LOI luôn, phí mất check miễn phí này.
+    extra = _py_syntax_check(path) if path.lower().endswith(".py") else ""
     cl, err = _client_for(path, os.path.dirname(path) or os.getcwd())
     if err:
+        if extra:
+            return extra
+        if path.lower().endswith(".py"):
+            return f"(cú pháp Python OK — {err} nên chưa kiểm tra sâu được)"
         return err
     try:
         lsp_out = clamp(cl.diagnostics(path), 4000)
-        if path.lower().endswith(".py"):
-            extra = _py_syntax_check(path)
-            if extra and "không có lỗi" in lsp_out:
-                return extra
-            if extra:
-                return lsp_out + "\n" + extra
+        if extra and "không có lỗi" in lsp_out:
+            return extra
+        if extra:
+            return lsp_out + "\n" + extra
         return lsp_out
     except Exception as e:
-        return f"[LOI LSP] {type(e).__name__}: {e}"
+        return extra or f"[LOI LSP] {type(e).__name__}: {e}"
 
 
 def lsp_definition(file, line=1, char=1):
@@ -416,7 +456,7 @@ def lsp_definition(file, line=1, char=1):
     if err:
         return err
     try:
-        return cl.definition(path, line, char)
+        return cl.definition(path, _int(line, 1), _int(char, 1))
     except Exception as e:
         return f"[LOI LSP] {type(e).__name__}: {e}"
 
@@ -429,7 +469,7 @@ def lsp_references(file, line=1, char=1):
     if err:
         return err
     try:
-        return cl.references(path, line, char)
+        return cl.references(path, _int(line, 1), _int(char, 1))
     except Exception as e:
         return f"[LOI LSP] {type(e).__name__}: {e}"
 
@@ -455,7 +495,7 @@ def lsp_hover(file, line=1, char=1):
     if err:
         return err
     try:
-        return cl.hover(path, line, char)
+        return cl.hover(path, _int(line, 1), _int(char, 1))
     except Exception as e:
         return f"[LOI LSP] {type(e).__name__}: {e}"
 
