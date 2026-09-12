@@ -20,9 +20,9 @@ APP="$DIR/personal-agent"
 if [ ! -f "$APP/main.py" ]; then
     APP="$(dirname "$DIR")/personal-agent"
 fi
-# fallback: repo đã clone
+# fallback: repo đã clone (thêm /workspaces cho GitHub Codespaces)
 if [ ! -f "$APP/main.py" ]; then
-    for base in "$HOME/Rem007" "$HOME/rem/Rem007" "$HOME/Documents/Rem007"; do
+    for base in "$HOME/Rem007" "$HOME/rem/Rem007" "$HOME/Documents/Rem007" "/workspaces/Rem007"; do
         if [ -f "$base/personal-agent/main.py" ]; then
             APP="$base/personal-agent"
             break
