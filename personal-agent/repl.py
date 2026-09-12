@@ -4,10 +4,122 @@ import config
 import sessions
 import updater
 import render
+from mcplib import atomic_write_json
 from agentloop import Agent
-from extensions import Manager
-from permissions import PermPolicy, Presets
+from permissions import Presets
 from providers import groq
+
+_OUT_LOCK = threading.Lock()
+try:
+    import readline
+    _HAS_READLINE = True
+except Exception:
+    _HAS_READLINE = False
+
+
+def _redisplay_input():
+    try:
+        if _HAS_READLINE and sys.stdin.isatty():
+            readline.redisplay()
+    except Exception:
+        pass
+
+
+def _is_inject_noise(text):
+    """Lọc dòng rác terminal paste nhầm (prompt/logo/status echo) — không đẩy cho agent."""
+    import re as _re
+    t = (text or "").strip()
+    if not t or len(t) <= 1:
+        return True
+    if any(k in t for k in ("╭─❯", "╰─❯", "📥 Đã chuyển", "⏳ ❯", "⏳(",
+                            "Gõ /help", "gõ câu hỏi", "/list danh mục")):
+        return True
+    # mảnh logo ASCII / box-drawing còn sót (có thể lẫn < > . " = # * + :)
+    s = t.replace("User>", "").replace("❯", "").strip()
+    if s and _re.fullmatch(r"[|_\\/()\-─│╭╰/box<>.\"'=:#+* ]+", s):
+        return True
+    if _re.fullmatch(r"[|_\\/ ]{4,}", s or ""):
+        return True
+    return False
+
+
+OVERLAY_FILE = os.path.join(config.DIR, "overlay.json")
+OVERLAY_PID = os.path.join(config.DIR, "overlay.pid")
+REPLAY_TOOLS = {"skill_use", "rec_play", "skill_find", "rec_list", "rec_show", "skill_list"}
+OVERLAY_GROUPS = {"desktop", "web", "mang-xa-hoi", "media"}
+
+
+def _overlay_write(mode="", task=None, tool=None, progress=None):
+    """Ghi trạng thái lên cửa sổ nổi (best-effort, không bao giờ crash agent).
+    Read-modify-write dưới lock + ghi atomic (tmp+replace) để overlay đọc
+    đồng thời không bao giờ thấy file rách."""
+    try:
+        with _OUT_LOCK:
+            d = {}
+            try:
+                with open(OVERLAY_FILE, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                if isinstance(old, dict):
+                    d = old
+            except Exception:
+                d = {}
+            if mode:
+                d["mode"] = mode
+            if task is not None:
+                d["task"] = (task or "")[:220]
+            if tool is not None:
+                d["tool"] = (tool or "")[:160]
+            if progress is not None:
+                d["progress"] = (progress or "")[:120]
+            d["updated"] = time.time()
+            atomic_write_json(OVERLAY_FILE, d)
+    except Exception:
+        pass
+
+
+def _overlay_running():
+    try:
+        with open(OVERLAY_PID, "r", encoding="utf-8") as f:
+            pid = int((f.read() or "").strip() or 0)
+        if pid > 0:
+            os.kill(pid, 0)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _overlay_ensure():
+    """Tự mở cửa sổ nổi nếu có màn hình và chưa chạy. Trả True nếu đang hiện."""
+    try:
+        if not os.environ.get("DISPLAY"):
+            return False
+        if _overlay_running():
+            return True
+        root = os.path.dirname(os.path.abspath(__file__))
+        subprocess.Popen([sys.executable, os.path.join(root, "overlay.py")],
+                         cwd=root, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except Exception:
+        return False
+
+
+def _overlay_stop():
+    try:
+        with open(OVERLAY_PID, "r", encoding="utf-8") as f:
+            pid = int((f.read() or "").strip() or 0)
+        if pid > 0:
+            os.kill(pid, 15)
+    except Exception:
+        pass
+    try:
+        # Ngoặc [p] để pkill không tự match chính lệnh này (self-match footgun)
+        subprocess.run(["pkill", "-f", "[p]ersonal-agent/overlay.py"],
+                       timeout=5, capture_output=True)
+    except Exception:
+        pass
+    _overlay_write(mode="RẢNH", task="", tool="", progress="đã tắt cửa sổ nổi")
 
 C = {
     "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
@@ -71,11 +183,15 @@ _SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
           "/stop", "/rest", "/models", "/debug", "/think", "/del", "/auto",
           "/safe", "/status", "/sessions", "/new", "/plan", "/build", "/agent",
           "/lsp", "/mcp", "/init", "/keys", "/key", "/checkupdate", "/update",
-          "/exit", "/quit", "/export"]
+          "/overlay", "/exit", "/quit", "/export"]
 
 
 def _p(s, col="cy", end="\n"):
-    print(C.get(col, "") + str(s) + C["reset"], end=end, flush=True)
+    with _OUT_LOCK:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.write(C.get(col, "") + str(s) + C["reset"] + end)
+        sys.stdout.flush()
+    _redisplay_input()
 
 
 def _strip_ansi(s):
@@ -92,27 +208,30 @@ def _type(s, col=None):
     fast = render.disp_len(text) > 1000
     sa = 0.0 if fast else T * 1.0    # pause sau khoảng trắng
     sw = 0.0 if fast else T * 0.45   # pause sau từ
-    sys.stdout.write("\033[?25l")
-    try:
-        for tok in render._tokens(text):
-            if tok[0] == "esc":
-                sys.stdout.write(tok[1])
-            elif tok[0] == "s":
-                sys.stdout.write(tok[1])
-                if sa:
-                    sys.stdout.flush()
-                    time.sleep(sa)
-            else:
-                sys.stdout.write((tok[1] or "") + tok[2])
-                if sw:
-                    sys.stdout.flush()
-                    time.sleep(sw)
-    except Exception:
-        sys.stdout.write(_strip_ansi(text))
-    finally:
-        sys.stdout.write("\033[?25h")
+    with _OUT_LOCK:
+        sys.stdout.write("\033[?25l")
+        try:
+            for tok in render._tokens(text):
+                if tok[0] == "esc":
+                    sys.stdout.write(tok[1])
+                elif tok[0] == "s":
+                    sys.stdout.write(tok[1])
+                    if sa:
+                        sys.stdout.flush()
+                        time.sleep(sa)
+                else:
+                    sys.stdout.write((tok[1] or "") + tok[2])
+                    if sw:
+                        sys.stdout.flush()
+                        time.sleep(sw)
+        except Exception:
+            sys.stdout.write(_strip_ansi(text))
+        finally:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+        sys.stdout.write("\n")
         sys.stdout.flush()
-    print(flush=True)
+    _redisplay_input()
 
 
 def _klines(logo, colors):
@@ -203,6 +322,7 @@ class Repl:
         self._tool_t0 = 0.0       # mốc bắt đầu tool hiện tại (hiện số giây kiểu opencode)
         self.rec_mode = ""        # tên macro đang ghi (chế độ ghi từ /rec), "" = chat thường
         self._list_items = []     # [(kind,id,desc)] của lần /list gần nhất (chọn số để mở)
+        self._in_input = False    # True khi main thread đang ở input() → spinner không animate đè
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -222,6 +342,15 @@ class Repl:
             self._cur_title = _tool_title(ev)
             self._tool_t0 = time.time()
             self._set_status(self._cur_title)
+            try:
+                nm = ev.get("name", "") if isinstance(ev, dict) else ""
+                if nm in REPLAY_TOOLS:
+                    _overlay_write(mode="PHÁT LẠI NHANH", tool=self._cur_title,
+                                   progress="phát lại quy trình đã học")
+                else:
+                    _overlay_write(tool=self._cur_title)
+            except Exception:
+                pass
         elif t == "tool_done":
             r = (ev.get("result") or "")
             ok = not r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]"))
@@ -231,7 +360,7 @@ class Repl:
             self._tool_rows.append((row, not ok))
             if len(self._tool_rows) > 14:
                 self._tool_rows.pop(0)
-            _p("\r" + row, "gr" if ok else "rd")
+            _p(row, "gr" if ok else "rd")
             # Diff cũ/mới kiểu opencode: hiện ngay dưới dòng ✓ khi sửa/tạo file
             # màn hình rộng → 2 cột CŨ|MỚI, hẹp → diff 1 cột
             if ok and ev.get("name") in ("edit_file", "write_file", "apply_patch") and ev.get("full"):
@@ -274,11 +403,13 @@ class Repl:
             self._status_since = time.time()
         is_tty = sys.stdout.isatty() and not config.DEBUG
         last_msg = None
-        last_warn = 0
         while self._spin_on:
             msg = self._status_msg or ""
-            if not is_tty:
-                # Không animate frame — CHÌ in lại khi trạng thái THAY ĐỔI.
+            # Khi user đang gõ inject (main thread ở input()) → KHÔNG animate \r
+            # đè lên dòng đang gõ (gây loạn chữ + mất chữ + paste lặp 40 lần).
+            # Chỉ in khi trạng thái đổi, mỗi trạng thái 1 dòng mới.
+            if (not is_tty) or self._in_input:
+                # Không animate frame — CHỈ in lại khi trạng thái THAY ĐỔI.
                 # Tránh "treo" hiện ra hàng trăm dòng lặp lại trong log/pipe.
                 cur = re.sub(r"\x1b\[[0-9;]*m", "", msg).strip()
                 if cur and cur != last_msg:
@@ -286,7 +417,6 @@ class Repl:
                     tag = f"  [{w}s]{'  ⏳ lâu quá — /stop nếu kẹt' if w >= config.TOOL_SLOW_WARN else ''}"
                     _p(f"  {cur}" + (tag if w >= 3 else ""), "dim")
                     last_msg = cur
-                    last_warn = w
                 time.sleep(0.5)
                 continue
             f = SPIN[i % len(SPIN)]
@@ -305,16 +435,19 @@ class Repl:
             else:
                 col = "\033[36m"
             # kiểu opencode: frame spinner màu + nội dung mờ — chậm hơn để bớt "nháy"
-            sys.stdout.write("\r" + col + f + C["dim"] + base[:150] + C["reset"] + "\033[K")
-            sys.stdout.flush()
-            time.sleep(0.25)
+            with _OUT_LOCK:
+                sys.stdout.write("\r" + col + f + C["dim"] + base[:150] + C["reset"] + "\033[K")
+                sys.stdout.flush()
+            time.sleep(0.4)
             i += 1
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        with _OUT_LOCK:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
 
     def _clear_spin_line(self):
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        with _OUT_LOCK:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
 
 # ── worker: xử lý câu hỏi theo hàng đợi, cho phép soạn câu mới chờ lượt ──
     def _pause_kind(self, out):
@@ -341,6 +474,10 @@ class Repl:
                     self._agent.stop()
                 except Exception:
                     pass
+                try:
+                    self.manager.interrupt()
+                except Exception:
+                    pass
                 # dọn các câu đang chờ — tránh chạy nối tiếp vô nghĩa sau khi dừng
                 drained = 0
                 while True:
@@ -360,7 +497,28 @@ class Repl:
             if kind == "task":
                 self._busy = True
                 self._spin_on = True
+                try:
+                    self.manager.reset_interrupt()
+                except Exception:
+                    pass
                 self._set_status("đang bắt đầu")
+                # Việc tay chân (desktop/web/mạng xã hội/media) → tự mở cửa sổ nổi
+                # để user NHÌN THẤY từng thao tác. Lần đầu agent quan sát kỹ + tự học,
+                # lần sau phát lại nhanh (overlay chuyển PHÁT LẠI NHANH ở tool_start).
+                try:
+                    from agentloop import route_task as _rt
+                    _gr, _ = _rt(payload or "")
+                except Exception:
+                    _gr = []
+                try:
+                    if any(g in OVERLAY_GROUPS for g in (_gr or [])):
+                        _overlay_ensure()
+                        _overlay_write(mode="QUAN SÁT", task=payload or "",
+                                       tool="", progress="quan sát lần đầu + tự học")
+                    else:
+                        _overlay_write(task=payload or "", tool="", progress="đang bắt đầu")
+                except Exception:
+                    pass
                 self._tool_rows = []
                 self._cur_title = ""
                 self._live_n = 0
@@ -395,20 +553,22 @@ class Repl:
                         break
                 if auto_runs >= AUTO_RESUME_MAX:
                     _p(f"Đã tự chạy tiếp {AUTO_RESUME_MAX} lần chưa xong — nếu vẫn kẹt hãy báo lại bằng /stop.", "ye")
-                # CHỈ ĐẠO TỒN: lệnh gõ đúng lúc agent vừa xong bước cuối → làm tiếp luôn
-                for _ in range(3):
-                    try:
-                        _left = self._agent._drain_notes()
-                    except Exception:
-                        _left = []
-                    if not _left:
-                        break
+                # CHỈ ĐẠO TỒN: lệnh gõ đúng lúc agent vừa xong bước cuối → làm tiếp luôn.
+                # Gộp 1 lần duy nhất, tối đa 5 chỉ đạo — thừa thì bỏ + báo (chống tồn 40 lệnh
+                # như log lỗi do paste rác terminal).
+                try:
+                    _left = self._agent._drain_notes()
+                except Exception:
+                    _left = []
+                if _left:
+                    if len(_left) > 5:
+                        _p(f"[live] bỏ {len(_left)-5} chỉ đạo thừa (giữ 5 mới nhất) — chống kẹt hàng chờ.", "ye")
+                        _left = _left[-5:]
                     _p(f"[live] còn {len(_left)} chỉ đạo giữa chừng — làm tiếp...", "dim")
                     try:
                         out = self._agent.run("[CHỈ ĐẠO GIỮA CHỪNG — điều chỉnh việc đang làm theo yêu cầu mới, không làm lại từ đầu]\n" + "\n".join(_left))
                     except Exception as e:
                         out = f"[LỖI] {type(e).__name__}: {e}"
-                        break
                 self._last_out = out
                 self._spin_on = False
                 self._busy = False
@@ -416,8 +576,9 @@ class Repl:
                 self._clear_spin_line()   # rồi mới in tránh bị đè "Rem>"
                 # timeline tool ĐÃ in live khi từng tool xong ở _on_ev — không in lại nữa
                 if out:
-                    sys.stdout.write(P_AGENT)
-                    sys.stdout.flush()
+                    with _OUT_LOCK:
+                        sys.stdout.write(P_AGENT)
+                        sys.stdout.flush()
                     think, body = render.split_thinking(out)
                     self._last_think = think
                     # Opencode-style thinking block
@@ -426,10 +587,14 @@ class Repl:
                     # Body — render markdown sạch (opencode-style)
                     if body.strip():
                         _type(render.md_to_ansi(body), None)
-                    # Đáp án xong → gợi ý phím tắt kiểu opencode, giữ con trỏ tại ❯
+                    # Đáp án xong → gợi ý phím tắt kiểu opencode.
+                    # KHÔNG in "❯ " tay ở đây — vòng input() kế tiếp sẽ in prompt
+                    # (in tay gây double prompt "❯ ❯" và dính chữ như log lỗi).
                     self._footer_hints()
-                    sys.stdout.write(C["bold"] + C["cy"] + "❯ " + C["reset"])
-                    sys.stdout.flush()
+                try:
+                    _overlay_write(mode="XONG", tool="", progress="xong — lần sau phát lại nhanh")
+                except Exception:
+                    pass
                 self._pending = 0
 
     # ── câu hỏi quyền (safe mode): chạy trong worker, hỏi trực tiếp ──
@@ -456,7 +621,7 @@ class Repl:
             pass
         _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
         if not groq.keys():
-            _p(f"⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
+            _p("⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
 
     def agent_auto(self):
         try:
@@ -562,10 +727,10 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             role = m.get("role", "?")
             body = (m.get("content") or "").strip()
             if role == "user":
-                lines += [f"## 🙋 Bạn", "", body, ""]
+                lines += ["## 🙋 Bạn", "", body, ""]
             elif role == "assistant":
                 if body and body != "(rỗng)":
-                    lines += [f"## 🤖 Rem", "", body, ""]
+                    lines += ["## 🤖 Rem", "", body, ""]
             elif role == "tool":
                 lines.append(f"- 🔧 `{m.get('name', '?')}`: {body[:200]}")
         d = os.path.join(config.DIR, "exports")
@@ -715,6 +880,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/debug   bật/tắt chế độ gỡ lỗi",
                     "/think   xem đầy đủ suy luận của lần trả lời cuối",
                     "/clear   xoá màn hình (hiện logo REM)",
+                    "/overlay on|off|status  cửa sổ nổi hiện việc đang làm",
                     "/checkupdate  kiểm tra bản mới trên GitHub",
                     "/update  tự cập nhật bản mới nhất (git/tarball)",
                     "/lsp <file>  kiểm tra lỗi file nguồn (clangd/pylsp)",
@@ -776,12 +942,43 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 self._send(f"Dùng rec_stop để dừng ghi và lưu macro '{nm}', rồi rec_show để xác nhận nội dung")
             else:
                 _p("Không ở chế độ ghi (ấn 2 trong /list để ghi thao tác).", "dim")
+        elif cmd == "/overlay" or cmd.startswith("/overlay "):
+            arg = (parts[1] if len(parts) > 1 else "status").lower()
+            if arg == "on":
+                ok = _overlay_ensure()
+                _overlay_write(mode="RẢNH", task="", tool="", progress="đã bật cửa sổ nổi")
+                _p("Đã bật cửa sổ nổi." if ok else "Không mở được cửa sổ nổi (không có màn hình?).", "gr" if ok else "ye")
+            elif arg == "off":
+                _overlay_stop()
+                _p("Đã tắt cửa sổ nổi.", "gr")
+            else:
+                _p(f"Cửa sổ nổi: {'ĐANG CHẠY' if _overlay_running() else 'đang tắt'} (gõ /overlay on|off)", "dim")
         elif cmd == "/clear":
             self._clear()
         elif cmd == "/stop":
             if self._busy:
                 self._agent.stop()
-                _p("⏹  Đang dừng agent…", "ye")
+                try:
+                    self.manager.interrupt()
+                except Exception:
+                    pass
+                try:
+                    left = self._agent._drain_notes()
+                except Exception:
+                    left = []
+                drained = len(left)
+                while True:
+                    try:
+                        k, _ = self.q.get_nowait()
+                    except Exception:
+                        break
+                    if k == "quit":
+                        self.q.put(("quit", None))
+                        break
+                    if k == "task":
+                        drained += 1
+                self._pending = 0
+                _p(f"⏹  Đang dừng agent…{(f' (đã bỏ {drained} câu/chỉ đạo chờ)' if drained else '')}", "ye")
             else:
                 _p("Agent đang rảnh.", "dim")
         elif cmd == "/rest" or cmd.startswith("/rest "):
@@ -973,27 +1170,30 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         print(C["dim"] + left + " " * pad + right + C["reset"], flush=True)
 
     def _prompt_hint(self):
-        # Opencode-style: thẻ nhập 2 dòng (dòng gợi ý mờ + dòng ❯ nhập liệu)
+        # Opencode-style: thẻ nhập LUÔN 2 dòng (dòng gợi ý mờ + dòng ❯ nhập liệu).
+        # Giữ cùng chiều cao khi bận/rảnh để không sót dòng prompt cũ gây dính chữ.
         try:
             lv = self._agent.live_count()
         except Exception:
             lv = 0
         rec = (C["rd"] + "⏺REC " + C["reset"]) if self.rec_mode else ""
         live = (C["ye"] + f"📥{lv} " + C["reset"]) if lv else ""
-        if self._busy:
-            return (rec + live + C["dim"] + "⏳ " + C["reset"]
-                    + C["bold"] + C["cy"] + "❯ " + C["reset"])
-        if self._pending:
-            return (rec + live + C["dim"] + f"⏳({self._pending}) " + C["reset"]
-                    + C["bold"] + C["cy"] + "❯ " + C["reset"])
         card_top = (C["dim"] + "╭─❯ gõ câu hỏi · /list danh mục · /rec ghi thao tác"
                     + C["reset"] + "\n")
+        if self._busy:
+            top = (C["dim"] + "╭─❯ đang chạy — gõ để điều chỉnh · /stop để dừng"
+                   + C["reset"] + "\n")
+            return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
+        if self._pending:
+            top = (C["dim"] + f"╭─❯ xếp hàng ({self._pending}) — chờ lượt chạy"
+                   + C["reset"] + "\n")
+            return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
         return card_top + rec + live + C["bold"] + C["cy"] + "╰─❯ " + C["reset"]
 
     def run(self):
         self._clear()
         if not groq.keys():
-            _p(f"⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
+            _p("⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
         if self.headless is None:
             try:
                 print(_logo_banner())
@@ -1006,7 +1206,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             except Exception:
                 pass
             _p("Gõ /list để xem macro/skill/chat cũ (chọn số để mở) | /rec để ghi thao tác", "dim")
-            _p(f"Đang khởi chạy extensions...", "dim")
+            _p("Đang khởi chạy extensions...", "dim")
         else:
             try:
                 self._header_box()
@@ -1024,12 +1224,18 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             return
         while True:
             try:
-                line = input(self._prompt_hint()).strip()
+                self._in_input = True
+                try:
+                    line = input(self._prompt_hint()).strip()
+                finally:
+                    self._in_input = False
             except EOFError:
+                self._in_input = False
                 _p("\nTạm biệt!", "dim")
                 self.q.put(("quit", None))
                 break
             except KeyboardInterrupt:
+                self._in_input = False
                 if self._busy:
                     _p("\n⏹  Đang dừng agent…", "ye")
                     self.q.put(("stop", None))
@@ -1054,6 +1260,16 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             # HAI PHẦN: đang bận = luồng LÀM chạy, dòng gõ = luồng NGHE.
             # Lệnh mới lái TRỰC TIẾP việc đang chạy (inject), không xếp hàng chờ.
             if self._busy:
+                if _is_inject_noise(line):
+                    _p("(bỏ qua dòng rác terminal paste nhầm — không chuyển cho agent)", "dim")
+                    continue
+                try:
+                    cur_n = self._agent.live_count()
+                except Exception:
+                    cur_n = 0
+                if cur_n >= 5:
+                    _p(f"Hàng chờ đầy ({cur_n}/5) — gõ /stop để dừng trước khi ra lệnh mới.", "ye")
+                    continue
                 try:
                     n = self._agent.inject(line)
                 except Exception:
@@ -1061,8 +1277,24 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 _p(f"📥 Đã chuyển cho agent đang chạy ({n} chỉ đạo chờ) — nó điều chỉnh ngay trong lượt này.",
                    "ye")
                 continue
-            # Opencode-style: highlight user input, show as "User" block
-            sys.stdout.write("\033[1A\r\033[2K")
-            sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + line + C["reset"] + "\n")
-            sys.stdout.flush()
+            # Opencode-style: highlight user input, show as "User" block.
+            # Xóa dòng input vừa gõ theo đúng số hàng vật lý (prompt 2 dòng + chữ dài
+            # có thể wrap) — bản cũ chỉ lùi 1 hàng nên sót chữ gây dính logo/prompt.
+            try:
+                with _OUT_LOCK:
+                    try:
+                        _vis = re.sub(r"\x1b\[[0-9;]*m", "", self._prompt_hint())
+                        _total = render.disp_len(_vis) + render.disp_len(line)
+                        _tw = render.term_width() or 90
+                        _rows = max(1, (_total + _tw - 1) // _tw)
+                        sys.stdout.write("\r\033[2K")
+                        for _ in range(_rows - 1):
+                            sys.stdout.write("\033[1A\033[2K")
+                        sys.stdout.write("\r")
+                    except Exception:
+                        sys.stdout.write("\n")
+                    sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + line + C["reset"] + "\n")
+                    sys.stdout.flush()
+            except Exception:
+                _p("User> " + line, "lm")
             self.q.put(("task", line))

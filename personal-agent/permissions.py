@@ -77,6 +77,14 @@ def _match_pattern(pattern, tool_name, args):
 class PermPolicy:
     def __init__(self):
         self.auto = os.environ.get("REM_SAFE", "0") != "1"
+        # FULL-AUTO do user cấp: file ~/.rem_ai/full_auto chứa "1" → luôn auto,
+        # kể cả khi REM_SAFE=1. Mặc định từ nay: tự động chạy, không hỏi.
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".rem_ai", "full_auto"), encoding="utf-8") as f:
+                if f.read().strip() == "1":
+                    self.auto = True
+        except Exception:
+            pass
         self.overrides = {}  # tool -> "allow"/"ask"/"deny"
         self.session_approved = set()  # per-session approval memory
         self.rules = _load_rules()  # config ruleset

@@ -1,4 +1,4 @@
-import json, threading
+import json, threading, time
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -155,8 +155,17 @@ class Client:
         self._id = 0
         self._lock = threading.Lock()
         self._pending = {}
+        self._cancel = threading.Event()
         self._reader = threading.Thread(target=self._loop, daemon=True)
         self._reader.start()
+
+    def cancel_pending(self):
+        """Đánh dấu hủy: request đang chờ sẽ ném InterruptedError trong ≤0.5s
+        thay vì treo tới hết timeout (90-600s). Dùng cho /stop."""
+        self._cancel.set()
+
+    def reset_cancel(self):
+        self._cancel.clear()
 
     def _loop(self):
         try:
@@ -193,10 +202,18 @@ class Client:
             with self._lock:
                 self._pending.pop(mid, None)
             raise ConnectionError(f"Không thể gửi tới MCP server: {e}")
-        if not fut.wait(timeout):
-            with self._lock:
-                self._pending.pop(mid, None)
-            raise TimeoutError(f"MCP timeout: {method}")
+        end = time.time() + max(0.5, timeout)
+        while True:
+            if fut.wait(min(0.5, max(0.0, end - time.time()))):
+                break
+            if self._cancel.is_set():
+                with self._lock:
+                    self._pending.pop(mid, None)
+                raise InterruptedError("đã dừng theo yêu cầu (/stop)")
+            if time.time() >= end:
+                with self._lock:
+                    self._pending.pop(mid, None)
+                raise TimeoutError(f"MCP timeout: {method}")
         if holder[1] is not None:
             raise holder[1]
         resp = holder[0]

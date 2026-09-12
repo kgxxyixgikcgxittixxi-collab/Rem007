@@ -330,8 +330,10 @@ class KeyManager:
             return
         try:
             payload = {k: dict(v) for k, v in self._stats.items()}
-            with open(_STATS_FILE, "w", encoding="utf-8") as f:
+            tmp = _STATS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, _STATS_FILE)
         except Exception:
             pass
 
@@ -630,7 +632,6 @@ def chat(msgs, tools=None, budget=None):
                 break
             r = _post(body, m, budget=max(1, end - time.time()))
             if r == "RATE":
-                last = "RATE"
                 continue
             if r is not None:
                 return r.json()["choices"][0]["message"]

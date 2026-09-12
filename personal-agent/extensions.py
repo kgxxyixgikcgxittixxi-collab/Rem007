@@ -57,6 +57,24 @@ def _external_specs():
     return specs
 
 
+# Tool subagent tích hợp (không cần MCP server riêng): agent con CHỈ ĐỌC.
+TASK_DEF = {
+    "name": "task",
+    "description": ("SUBAGENT (kiểu Explore): giao việc tách biệt nặng (quét repo, "
+                    "tìm hiểu code, tra cứu song song) cho agent con chạy trong "
+                    "context riêng, chỉ trả TÓM TẮT về. Agent con CHỈ ĐỌC — không "
+                    "ghi file/sửa code/chạy shell. Không lồng quá 1 tầng."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "description": "mô tả ngắn việc (3-5 từ)"},
+            "prompt": {"type": "string", "description": "chỉ đạo chi tiết + format kết quả cần trả"},
+        },
+        "required": ["prompt"],
+    },
+}
+
+
 class Extension:
     def __init__(self, name, module, desc, command=None, env=None):
         self.name = name
@@ -131,9 +149,12 @@ class Extension:
 
 class Manager:
     def __init__(self, specs=None):
+        import threading as _th
         base = list(specs) if specs is not None else list(SPECS)
         base = base + _external_specs()
         self.extensions = [Extension(**s) for s in base]
+        self._task_n = 0
+        self._task_lock = _th.Lock()
 
     def start_all(self):
         # Khởi động song song (trước đây nối tiếp ~6s). Mỗi extension chỉ chạm
@@ -192,9 +213,102 @@ class Manager:
                         },
                     }
                 )
+        if self._task_depth() == 0:
+            out.append({"type": "function", "function": dict(TASK_DEF)})
         return out
 
+    # ── task subagent (kiểu Claude Code Explore): agent con chạy việc tách biệt
+    # trong context riêng, chỉ trả tóm tắt về — context chính không bị ngập.
+    def _task_depth(self):
+        try:
+            with self._task_lock:
+                return self._task_n
+        except Exception:
+            return 0
+
+    def _run_subagent(self, args, timeout=120):
+        """Chạy agent con: đọc-hiểu/tìm kiếm/tóm tắt việc tách biệt (CHỈ ĐỌC +
+        tìm kiếm, CẤM ghi file/sửa code/chạy shell/điều khiển máy)."""
+        import threading as _th
+        desc = ""
+        prompt = ""
+        if isinstance(args, dict):
+            desc = str(args.get("description", "") or "")[:200]
+            prompt = str(args.get("prompt", "") or "")[:4000]
+        if not prompt.strip():
+            return "[LOI] task cần 'prompt' mô tả việc cho agent con"
+        with self._task_lock:
+            if self._task_n >= 1:
+                return "[LOI] subagent đã tới giới hạn lồng nhau (1 tầng) — tự làm tiếp"
+            self._task_n += 1
+        try:
+            import sessions as _sessions
+            from permissions import PermPolicy as _Perm
+            from agentloop import Agent as _Agent
+            perm = _Perm()
+            # BẮT BUỘC: bỏ ruleset allow-* toàn cục (full-auto của user) khỏi
+            # agent con — nếu không overrides deny bên dưới bị ruleset đè,
+            # agent con CHỈ ĐỌC sẽ lén có full quyền ghi/shell.
+            perm.rules = []
+            for t in ("write_file", "edit_file", "apply_patch", "bash", "bash_poll",
+                      "chdir", "pip_install", "ensure_tool", "task",
+                      "dl_click", "dl_type", "dl_key", "dl_mouse", "dl_clipboard",
+                      "rec_start", "rec_stop", "rec_play", "rec_delete",
+                      "browser_open", "browser_navigate", "browser_click",
+                      "browser_click_text", "browser_type", "browser_press",
+                      "browser_eval", "browser_wait", "browser_scroll",
+                      "browser_search", "browser_back", "browser_close",
+                      "social_cycle", "social_post",
+                      "media_tts", "media_image", "media_scene", "media_slideshow",
+                      "media_concat", "media_trim", "media_scale", "media_to_gif",
+                      "media_overlay_text", "media_extract_audio"):
+                perm.overrides[t] = "deny"
+            sid = _sessions.new()
+            child = _Agent(self, perm, sid=sid, on_event=None)
+            box = {}
+            def _run():
+                try:
+                    box["out"] = child.run(
+                        f"[SUBAGENT task: {desc}]\n{prompt}\n\n"
+                        "Bạn là agent con CHỈ ĐỌC: tìm hiểu/trả lời, KHÔNG sửa gì. "
+                        "Cuối cùng trả TÓM TẮT gọn (dưới 1500 ký tự): kết quả + file/đường dẫn liên quan.")
+                except Exception as e:
+                    box["out"] = f"[LOI SUBAGENT] {type(e).__name__}: {e}"
+            th = _th.Thread(target=_run, daemon=True)
+            th.start()
+            th.join(timeout=max(10, min(int(timeout or 120), 240)))
+            if th.is_alive():
+                try:
+                    child.stop()
+                except Exception:
+                    pass
+                return "[LOI] subagent quá hạn — hãy chia nhỏ việc hơn"
+            out = (box.get("out") or "(rỗng)").strip()
+            return out[:3000]
+        finally:
+            with self._task_lock:
+                self._task_n = max(0, self._task_n - 1)
+
+    def interrupt(self):
+        """/stop: đánh thức mọi MCP request đang chờ trong ≤0.5s."""
+        for e in self.extensions:
+            try:
+                if e.client:
+                    e.client.cancel_pending()
+            except Exception:
+                pass
+
+    def reset_interrupt(self):
+        for e in self.extensions:
+            try:
+                if e.client:
+                    e.client.reset_cancel()
+            except Exception:
+                pass
+
     def call(self, name, args, timeout=120):
+        if name == "task":
+            return self._run_subagent(args, timeout)
         tm = self.tool_map()
         if name not in tm:
             return f"[LOI] tool '{name}' không tồn tại trong extension nào"
@@ -210,6 +324,8 @@ class Manager:
             if ext.enabled and any(x.get("name") == name for x in ext.tools):
                 return ext.call(name, args, timeout)
             return f"[LOI] extension '{ext.name}' bị mất kết nối, đã restart nhưng không hồi phục"
+        except InterruptedError:
+            return "[ĐÃ DỪNG] theo yêu cầu của người dùng."
         except TimeoutError:
             return f"[LOI] tool '{name}' chạy quá lâu (timeout)"
 

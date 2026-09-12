@@ -1,6 +1,8 @@
-import json, os, random, time
+import json, os, random, threading, time
 
 from config import DIR, CTX_TOTAL, CTX_CAP, SUM_AT, SUM_BUDGET
+
+_APPEND_LOCK = threading.Lock()
 from providers import groq
 
 SDIR = os.path.join(DIR, "sessions")
@@ -23,8 +25,17 @@ def new():
 
 
 def append(sid, msg):
-    with open(_f(sid), "a", encoding="utf-8") as f:
-        f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    # Ghi nối tiếp thread-safe + fsync: worker/compact/auto-resume ghi xen kẽ
+    # không rách JSONL, crash giữa chừng không mất dòng đã ghi.
+    line = json.dumps(msg, ensure_ascii=False) + "\n"
+    with _APPEND_LOCK:
+        with open(_f(sid), "a", encoding="utf-8") as f:
+            f.write(line)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
 
 
 def load(sid):

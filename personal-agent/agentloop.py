@@ -78,11 +78,19 @@ def _route_section(user_text):
         return ""
     gl = ", ".join(f"{g} ({MODULE_GROUPS[g]['desc']})" for g in groups)
     ml = ", ".join(mods)
-    return (f"\n\nĐỊNH TUYẾN CÔNG VIỆC: câu này thuộc nhóm [{gl}]. "
+    base = (f"\n\nĐỊNH TUYẾN CÔNG VIỆC: câu này thuộc nhóm [{gl}]. "
             f"ƯU TIÊN tool của module [{ml}] trước — đúng tool ngay từ bước đầu, "
             f"không gọi lung tung module khác trừ khi cần. "
             f"Việc desktop lặp lại → dùng macro recorder (rec_start/rec_play, xem rec_list) "
             f"thay vì click tay từng bước.")
+    if any(g in ("desktop", "web", "mang-xa-hoi", "media") for g in groups):
+        base += ("\n\nHỌC 1 LẦN – CHẠY NHANH MÃI MÃI (bắt buộc với việc tay chân, user đang nhìn cửa sổ nổi): "
+                 "B1: gọi skill_find(keyword ngắn) + rec_list() để tìm quy trình đã học. "
+                 "B2: nếu CÓ skill/macro khớp → skill_use/rec_play phát lại NGAY, không quan sát lại, không hỏi, không làm thừa. "
+                 "B3: nếu CHƯA có → quan sát kỹ đúng 1 lần (dl_status rồi dl_tree/dl_text, hoặc browser_open rồi browser_content), "
+                 "làm từng bước gọn theo thứ tự màn hình, xong việc hệ thống TỰ lưu skill cho lần sau. "
+                 "Mỗi tool gọi phải là 1 thao tác thật trên màn hình, ngắn gọn, không giải thích dài.")
+    return base
 
 
 def _load_skills_prompt():
@@ -274,15 +282,22 @@ class Agent:
 
     def stop(self):
         self.cancel.set()
+        try:
+            with self._live_lock:
+                self.live_notes = []
+        except Exception:
+            pass
 
     def inject(self, text):
         """Luồng NGHE → luồng LÀM: nhận lệnh mới ngay cả khi task đang chạy.
-        Trả về số chỉ đạo đang chờ."""
+        Trả về số chỉ đạo đang chờ. Tối đa 5 — thừa thì bỏ cũ nhất (chống tồn 40)."""
         try:
             with self._live_lock:
                 t = str(text or "").strip()
                 if t:
                     self.live_notes.append(t)
+                    if len(self.live_notes) > 5:
+                        self.live_notes = self.live_notes[-5:]
                 return len(self.live_notes)
         except Exception:
             return 0
@@ -379,6 +394,20 @@ class Agent:
             return True
         self._tool_fingerprints.add(fp)
         return False
+
+    def _repeat_failing(self, name):
+        """Cùng 1 tool thất bại 2+ lần liên tiếp → đang kẹt (đọc 3 file khác nhau
+        vẫn OK vì result_ok=True không tính)."""
+        streak = 0
+        for s in reversed(self._last_steps):
+            if s.get("tool") == name:
+                streak += 1
+            else:
+                break
+        if streak < 2:
+            return False
+        fails = sum(1 for s in self._last_steps[-streak:] if not s.get("result_ok"))
+        return fails >= 2
 
     def _cwd(self):
         try:
@@ -495,10 +524,15 @@ class Agent:
                     name = fn.get("name", "?")
                     try:
                         args = json.loads(fn.get("arguments") or "{}")
+                        if not isinstance(args, dict):
+                            raise ValueError("args không phải object")
                     except ValueError:
-                        args = {}
+                        sessions.append(self.sid, {"role": "tool", "tool_call_id": tc.get("id"),
+                            "name": name, "content": "[LOI] arguments JSON hỏng — gọi lại tool với JSON object đúng format, không bỏ qua bước này."})
+                        self._emit({"type": "tool_done", "name": name, "result": "[bad args json]"})
+                        continue
                     # SELF-HEALING: detect loops
-                    if self._is_looping(name, args):
+                    if self._is_looping(name, args) or self._repeat_failing(name):
                         sessions.append(self.sid, {"role": "tool", "tool_call_id": tc.get("id"),
                             "name": name, "content": "[SELF-HEAL] Phát hiện gọi lặp lại cùng thao tác. Hãy thử cách khác hoặc bỏ qua bước này."})
                         self._emit({"type": "tool_done", "name": name, "result": "[loop detected]"})

@@ -163,7 +163,6 @@ def _walk(o, depth, max_depth, limit, out, indent):
     tag = ""
     if role.lower() in _INTERACTIVE:
         ref = f"at{n}"
-        obj_id = id(o)
         _snap["map"][ref] = {"obj": o, "role": role, "name": name}
         tag = f" [{ref}]"
     line = f"{'  ' * depth}{role}{tag}" + (f" '{name}'" if name else "")
@@ -226,7 +225,6 @@ def _button_center(o):
 
 @_recorded("dl_click")
 def dl_click(ref="", name="", role="", a=None):
-    at = _at()
     obj = None
     info = ""
     if ref:
@@ -535,8 +533,9 @@ def rec_stop(a=None):
         x.pop("ok", None)
         acts.append(x)
     if not acts and dropped:
+        nm = _REC["name"]
         _REC.update(active=False, playing=False, name="", actions=[])
-        return (f"[LOI] macro '{data['name']}' rỗng — cả {dropped} bước ghi đều lỗi nên đã tự bỏ hết, "
+        return (f"[LOI] macro '{nm}' rỗng — cả {dropped} bước ghi đều lỗi nên đã tự bỏ hết, "
                 f"KHÔNG lưu macro rỗng. Hãy rec_start lại và kiểm tra từng bước (dl_status trước).")
     data = {"name": _REC["name"], "category": _REC["category"], "actions": acts,
             "created": time.strftime("%Y-%m-%d %H:%M"), "count": len(acts)}
