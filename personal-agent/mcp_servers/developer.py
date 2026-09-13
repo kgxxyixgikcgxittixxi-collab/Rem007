@@ -730,9 +730,93 @@ def pip_install(pkg, timeout=600):
     _log(f"OK_PIP {base}=={version} (by {author}) → {py}")
     result = f"[OK] đã cài {base}=={version}"
     if py == PVENV_PY:
-        result += f" (trong venv ~/.rem_ai/venv)"
+        result += " (trong venv ~/.rem_ai/venv)"
     return result
 
+
+# ── PDF (chữ Việt chuẩn — KHÔNG dùng Helvetica mặc định) ─────────────────────
+
+def _pdf_fonts():
+    """Tìm font TTF hỗ trợ tiếng Việt (DejaVu/Noto/Liberation), trả (regular, bold)."""
+    cands = [
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+    ]
+    for r, b in cands:
+        if os.path.isfile(r) and os.path.isfile(b):
+            return r, b
+    for r, b in cands:
+        if os.path.isfile(r):
+            return r, r
+    return None, None
+
+
+def make_pdf(title, body, out=None):
+    """Tạo file PDF chuẩn tiếng Việt (font Unicode DejaVu) — title + các đoạn body.
+    Nếu muốn PDF có ảnh minh hoạ, vẫn phải dùng web_images + script reportlab riêng,
+    nhưng NHỚ đăng ký font Unicode, không dùng Helvetica (vỡ chữ tiếng Việt)."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.lib.colors import HexColor
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    except Exception as e:
+        return f"[LOI] reportlab chua cai (pip_install reportlab): {e}"
+    out = out or os.path.join(os.path.expanduser("~/Downloads"),
+                              f"rem_{time.strftime('%Y%m%d_%H%M%S')}.pdf")
+    try:
+        out = os.path.abspath(os.path.expanduser(out))
+    except Exception:
+        out = os.path.abspath(out)
+    reg, bold = _pdf_fonts()
+    if not reg:
+        return "[LOI] không tìm thấy font Unicode (DejaVu/Liberation/Noto) trên máy"
+    try:
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    except Exception:
+        pass
+    try:
+        pdfmetrics.registerFont(TTFont("RemFont", reg))
+        pdfmetrics.registerFont(TTFont("RemFont-Bold", bold or reg))
+    except Exception as e:
+        return f"[LOI] đăng ký font thất bại: {e}"
+    try:
+        pdfmetrics.registerFontFamily("RemFont", normal="RemFont", bold="RemFont-Bold",
+                                      italic="RemFont", boldItalic="RemFont-Bold")
+    except Exception:
+        pass
+    doc = SimpleDocTemplate(out, pagesize=A4,
+                            leftMargin=18 * mm, rightMargin=18 * mm,
+                            topMargin=16 * mm, bottomMargin=16 * mm,
+                            title=title or "Rem PDF")
+    import html as _html
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle("RemTitle", parent=styles["Title"], fontName="RemFont-Bold",
+                              fontSize=20, leading=26, textColor=HexColor("#1b5e20")))
+    styles.add(ParagraphStyle("RemBody", parent=styles["BodyText"], fontName="RemFont",
+                              fontSize=11, leading=17, spaceAfter=8))
+    story = [Paragraph(_html.escape(title or ""), styles["RemTitle"]), Spacer(1, 6)]
+    texts = body if isinstance(body, list) else [body or ""]
+    for t in texts:
+        t = str(t).strip()
+        if not t:
+            continue
+        if t.startswith("## "):
+            story.append(Spacer(1, 2))
+            story.append(Paragraph(_html.escape(t[3:].strip()), ParagraphStyle(
+                "RemH", parent=styles["RemBody"], fontName="RemFont-Bold", fontSize=13,
+                leading=18, spaceBefore=10, textColor=HexColor("#1b5e20"))))
+        elif t.startswith("- "):
+            story.append(Paragraph("• " + _html.escape(t[2:].strip()), styles["RemBody"]))
+        else:
+            story.append(Paragraph(_html.escape(t).replace("\n", "<br/>"), styles["RemBody"]))
+    doc.build(story)
+    size = os.path.getsize(out)
+    return f"Đã tạo PDF: {out} ({size} bytes, {size / 1024:.1f} KB)."
 
 # ── subagent (kiểu opencode Task) ────────────────────────────────────────────
 
@@ -816,6 +900,13 @@ TOOLS = [
          "Cài package PyPI an toàn. Đã xác minh tên tồn tại trên PyPI (chống typosquatting). "
          "Snapshot trước khi cài → nếu import fail thì tự rollback. Ghi audit log.",
          schema({"pkg": {"type": "string", "description": "tên package, vd: requests hoặc requests==2.31.0"}}), pip_install),
+    Tool("make_pdf",
+         "Tạo file PDF chuẩn tiếng Việt (font Unicode DejaVu, KHÔNG vỡ dấu). "
+         "title = tiêu đề; body = đoạn văn hoặc mảng đoạn (hỗ trợ '## ' tiêu đề mục, '- ' gạch đầu dòng); "
+         "out = đường dẫn PDF (mặc định ~/Downloads/rem_*.pdf).",
+         schema({"title": {"type": "string", "description": "tiêu đề PDF"},
+                 "body": {"type": "string", "description": "nội dung (string hoặc mảng đoạn văn)"},
+                 "out": {"type": "string", "description": "(tùy chọn) đường dẫn file PDF"}}), make_pdf),
     Tool("task",
          "Chạy một SUBAGENT độc lập (kiểu opencode Task) làm việc nền song song: giao description "
          "mô tả rõ nhiệm vụ + yêu cầu trả về kết quả cụ thể. Subagent có đầy đủ tool của riêng nó "
@@ -826,4 +917,4 @@ TOOLS = [
 ]
 
 if __name__ == "__main__":
-    Server(TOOLS, "developer", "0.2.0").serve(sys.stdin, sys.stdout)
+    Server(TOOLS, "developer", "0.3.0").serve(sys.stdin, sys.stdout)

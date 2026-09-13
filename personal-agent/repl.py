@@ -146,7 +146,7 @@ _TOOL_LABEL = {
     "apply_patch": "Patch", "bash": "Bash", "bash_poll": "Job", "list_dir": "List",
     "glob_files": "Glob", "grep": "Grep", "web_search": "WebSearch",
     "web_fetch": "WebFetch", "remember": "Remember", "recall": "Recall",
-    "ensure_tool": "Setup", "pip_install": "PyPI", "github_api": "GitHub",
+    "ensure_tool": "Setup", "pip_install": "PyPI", "make_pdf": "PDF", "github_api": "GitHub",
     "todo_list": "Todo", "todo_write": "Todo", "task": "Task",
     "log": "Log", "kill": "Kill",
     "browser_open": "Browser", "browser_navigate": "Browser", "browser_click": "Click",
