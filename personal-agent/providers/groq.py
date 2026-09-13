@@ -310,6 +310,17 @@ def _parse_retry_after(v):
         return None
 
 
+def _parse_reset(v):
+    """Groq reset header '7.66s'/'2m59.56s' → số giây. None nếu không parse được."""
+    if not v:
+        return None
+    m = re.match(r"^\s*(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?\s*$", str(v))
+    if not m or not any(m.groups()):
+        return None
+    h, mi, s = (float(x) if x else 0.0 for x in m.groups())
+    return h * 3600 + mi * 60 + s
+
+
 class KeyManager:
     """Quản lý nhiều Groq key (mỗi key 1 tài khoản độc lập) với:
     - Token bucket per key (RPM → chủ động tiết lưu, tránh 429 ngay từ đầu)
@@ -340,6 +351,12 @@ class KeyManager:
         # Groq miễn phí reset theo phút (RPU/RPM window) → khóa 90s là đủ chờ cửa sổ mới.
         # Xoay 23 key: key nào hết cửa sổ chỉ cần nghỉ ngắn, không phải nghỉ nguyên ngày.
         self._EXHAUST_COOLDOWN = 90
+        # ── Preempt quota (đọc header Groq, né TRƯỚC khi 429) ──
+        # Mỗi response đều kèm x-ratelimit-remaining-tokens (TPM còn lại) và
+        # x-ratelimit-remaining-requests (RPD còn lại). Key sắp hết → bỏ qua,
+        # xoay key khác ngay, không tốn 1 round-trip ăn 429.
+        self._rl = {}              # key -> {ts, tpm_left, rpd_left, reset_in}
+        self._TPM_FLOOR = 1500     # TPM còn lại dưới mức này → nhường key khác
 
     def _get_stats(self, key):
         s = self._stats.setdefault(key, {
@@ -413,6 +430,8 @@ class KeyManager:
                     s["circuit_failures"] = max(0, s["circuit_failures"] - 2)
                 if s["cooldown_until"] > now:
                     continue
+                if self._rl_skip(k, now):
+                    continue  # sắp hết TPM/RPD thật → nhường key khác, khỏi ăn 429
                 if not self._tokens_available(k, now):
                     continue
                 # vừa fail gần đây (30s) → cho hồi phục trước khi xoay lại
@@ -429,6 +448,7 @@ class KeyManager:
             # mới chờ, còn key khỏe là xoay tiếp, không chờ.
             best_wait = float("inf")
             best_key = None
+            best_tpm = -1.0
             dead_wait = float("inf")
             dead_key = None
             ex_wait = float("inf")
@@ -447,9 +467,11 @@ class KeyManager:
                     if wait < dead_wait:
                         dead_wait = wait
                         dead_key = k
-                elif wait < best_wait:
+                elif wait < best_wait - 1e-9 or (abs(wait - best_wait) < 1e-9
+                                                 and self._rl_tpm(k, now) > best_tpm):
                     best_wait = wait
                     best_key = k
+                    best_tpm = self._rl_tpm(k, now)
             if best_key is None:
                 best_key, best_wait = dead_key, dead_wait
             if best_key is None:
@@ -548,6 +570,52 @@ class KeyManager:
                 s["auth_dead"] = True
         self._save()
 
+    def note_headers(self, key, headers):
+        """Ghi quota THẬT từ response headers Groq (mọi response — 200 lẫn 429 — đều có).
+        headers: r.headers của requests (get case-insensitive)."""
+        try:
+            g = headers.get if hasattr(headers, "get") else (lambda n, d=None: None)
+            tpm = g("x-ratelimit-remaining-tokens")
+            rpd = g("x-ratelimit-remaining-requests")
+            rst = _parse_reset(g("x-ratelimit-reset-tokens"))
+            with self._lock:
+                e = self._rl.setdefault(key, {})
+                e["ts"] = time.time()
+                if tpm is not None:
+                    try:
+                        e["tpm_left"] = int(float(tpm))
+                    except Exception:
+                        pass
+                if rpd is not None:
+                    try:
+                        e["rpd_left"] = int(float(rpd))
+                    except Exception:
+                        pass
+                if rst is not None:
+                    e["reset_in"] = max(0.0, min(rst, 300.0))
+        except Exception:
+            pass
+
+    def _rl_tpm(self, key, now):
+        """TPM còn lại (còn tươi) — fallback hết key khỏe thì ưu tiên key còn nhiều."""
+        e = self._rl.get(key)
+        if not e or now - e.get("ts", 0) > 120:
+            return float("inf")
+        return e.get("tpm_left", float("inf"))
+
+    def _rl_skip(self, key, now):
+        """True = key sắp hết quota thật → bỏ qua, xoay key khác TRƯỚC khi 429."""
+        e = self._rl.get(key)
+        if not e or now - e.get("ts", 0) > 120:
+            return False  # chưa có số liệu → cho dùng
+        if e.get("rpd_left") is not None and e["rpd_left"] <= 0:
+            return True  # hết lượt ngày → chờ reset UTC
+        win = e.get("reset_in", 60.0) or 60.0
+        if now - e["ts"] < max(win, 1.0):
+            if e.get("tpm_left") is not None and e["tpm_left"] < self._TPM_FLOOR:
+                return True
+        return False
+
     def all_cooldown(self, available_keys):
         now = time.time()
         with self._lock:
@@ -560,8 +628,15 @@ class KeyManager:
             for k, s in sorted(self._stats.items(), key=lambda x: -x[1]["success"]):
                 status = "DEAD" if s.get("auth_dead") else ("OPEN" if s["circuit_open"] else ("CD" if s["cooldown_until"] > now else "OK"))
                 r = s.get("cooldown_reason") or ""
+                q = ""
+                e = self._rl.get(k)
+                if e and now - e.get("ts", 0) < 120:
+                    if e.get("tpm_left") is not None:
+                        q += f" T{e['tpm_left']}"
+                    if e.get("rpd_left") is not None:
+                        q += f" R{e['rpd_left']}"
                 lines.append(f"  {k[:14]}... {status:3} ok={s['success']} fail={s['fail']} "
-                             f"rate={s['rate']} net={s['net']}" + (f" [{r}]" if r else ""))
+                             f"rate={s['rate']} net={s['net']}" + (f" [{r}]" if r else "") + q)
             return "\n".join(lines)
 
     def ok_keys(self, available_keys):
@@ -737,6 +812,7 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
                 last = "TIMEOUT"
                 _note_slow(model)
                 continue
+            _km.note_headers(choice, getattr(r, "headers", None))  # quota thật → né trước 429
             if r.status_code == 200:
                 _km.report_success(choice)
                 if saw_rate:
