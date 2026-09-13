@@ -390,14 +390,19 @@ class KeyManager:
             h.popleft()
         return len(h) < self._RPM_SAFE
 
-    def pick_key(self, available_keys):
+    def pick_key(self, available_keys, exclude=None):
         """Chọn key bằng round-robin trong nhóm key KHỎE (đủ RPM, không cooldown/circuit,
-        không vừa fail). Không để 1 key 'hot' gánh hết — load chia đều để né rate limit."""
+        không vừa fail). Không để 1 key 'hot' gánh hết — load chia đều để né rate limit.
+        exclude: tập key vừa 429 trong request hiện tại → loại hẳn, XOAY NGAY sang key khác,
+        không bao giờ thử lại key vừa hết giới hạn trong cùng 1 lượt."""
         now = time.time()
+        excluded = set(exclude or ())
         with self._lock:
             healthy = []
             for i in range(len(available_keys)):
                 k = available_keys[(self._rr + i) % len(available_keys)]
+                if k in excluded:
+                    continue  # vừa 429 lượt này → đổi key khác luôn
                 s = self._get_stats(k)
                 if s.get("auth_dead"):
                     continue  # key chết xác thực (401/403 lặp) → cách ly, không chọn
@@ -419,16 +424,25 @@ class KeyManager:
                 self._rr = (self._rr + 1) % len(available_keys)
                 return choice, 0
             # không key khỏe → chọn key có cooldown ngắn nhất (ưu tiên key không chết auth;
-            # chỉ dùng key auth_dead khi toàn bộ pool đều chết)
+            # chỉ dùng key auth_dead khi toàn bộ pool đều chết).
+            # Key vừa 429 lượt này (exclude) chỉ dùng khi KHÔNG còn key nào khác — hết 23 key
+            # mới chờ, còn key khỏe là xoay tiếp, không chờ.
             best_wait = float("inf")
             best_key = None
             dead_wait = float("inf")
             dead_key = None
+            ex_wait = float("inf")
+            ex_key = None
             for k in available_keys:
                 s = self._get_stats(k)
                 if s["circuit_open"] and now - s["last_fail"] < self._CIRCUIT_RECOVERY:
                     continue
                 wait = max(0, s["cooldown_until"] - now)
+                if k in excluded:
+                    if wait < ex_wait:
+                        ex_wait = wait
+                        ex_key = k
+                    continue
                 if s.get("auth_dead"):
                     if wait < dead_wait:
                         dead_wait = wait
@@ -439,8 +453,12 @@ class KeyManager:
             if best_key is None:
                 best_key, best_wait = dead_key, dead_wait
             if best_key is None:
+                best_key, best_wait = ex_key, ex_wait
+            if best_key is None:
                 best_score = float("inf")
                 for k in available_keys:
+                    if k in excluded:
+                        continue
                     n = len(self._get_hist(k))
                     if n < best_score:
                         best_score = n
@@ -681,6 +699,7 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
     last = None
     attempts = 0
     saw_rate = False  # lượt này đã gặp 429 key nào chưa (để đếm rotation cứu lượt)
+    rate_hit = set()  # key nào 429/hết giới hạn lượt này → loại khỏi vòng pick, XOAY NGAY key khác
     max_attempts = min(len(ks) + 4, 16)  # xoay 23 key độc lập; không khóa pool khi 1 key 429
     end = time.time() + (budget if budget and budget > 0 else 75)
     import random as _rd
@@ -699,7 +718,7 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
         if _is_cancelled(cancel):
             return None
         attempts += 1
-        choice, wait = _km.pick_key(ks)
+        choice, wait = _km.pick_key(ks, exclude=rate_hit)
         if choice is None:
             break
         if wait > 0:
@@ -729,6 +748,9 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
                 _km.report_rate_limit(choice, retry)
                 # Key ĐỘC LẬP (thực nghiệm: key A 429 nhưng key B vẫn 200) →
                 # chỉ đánh dấu key đó nghỉ ngắn, KHÔNG khóa cả pool, xoay key khác ngay.
+                # rate_hit: key này hết giới hạn lượt này → các vòng sau loại hẳn,
+                # không thử lại key vừa 429 trong cùng 1 request.
+                rate_hit.add(choice)
                 saw_rate = True
                 last = "RATE"
                 continue
