@@ -181,7 +181,7 @@ MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
 # Registry lệnh / để gợi ý khi gõ sai/gõ dở (kiểu autocomplete opencode)
 _SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
           "/stop", "/rest", "/models", "/debug", "/think", "/del", "/auto",
-          "/safe", "/status", "/sessions", "/new", "/plan", "/build", "/agent",
+          "/safe", "/status", "/stats", "/sessions", "/new", "/plan", "/build", "/agent",
           "/lsp", "/mcp", "/init", "/keys", "/key", "/checkupdate", "/update",
           "/overlay", "/exit", "/quit", "/export"]
 
@@ -301,10 +301,11 @@ def _diff_preview(name, args):
 
 
 class Repl:
-    def __init__(self, manager, headless=None):
+    def __init__(self, manager, headless=None, resume_sid=None):
         self.manager = manager
         self.headless = headless      # None = REPL tương tác; còn lại = chạy 1 task rồi thoát
-        self.sid = sessions.new()
+        self.sid = resume_sid or sessions.new()   # resume_sid = tiếp tục phiên cũ (giữ context)
+        self.resume_sid = resume_sid
         self.presets = "build"
         self.q = queue.Queue()
         self._busy = False
@@ -323,12 +324,173 @@ class Repl:
         self.rec_mode = ""        # tên macro đang ghi (chế độ ghi từ /rec), "" = chat thường
         self._list_items = []     # [(kind,id,desc)] của lần /list gần nhất (chọn số để mở)
         self._in_input = False    # True khi main thread đang ở input() → spinner không animate đè
+        self._last_esc = 0.0      # mốc ESC gần nhất (ESC đúp ≤0.8s = dừng cứng kiểu opencode)
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
         self._agent = Agent(self.manager, Presets.build(), sid=sid or self.sid,
                             on_event=self._on_ev)
         self._agent.askfn = self._ask
+
+    # ── dừng opencode-style: ESC đơn = mềm (wrap-up), ESC đúp = cứng (bỏ hết) ──
+    def _request_stop(self, hard=False):
+        """Luồng NGHE gọi trực tiếp (không qua hàng chờ) để dừng trong ≤0.5s.
+        soft: cancel LLM (poll 0.2s) + interrupt MCP tool (0.5s), giữ wrap-up.
+        hard (ESC×2): thêm cờ hard_abort → worker bỏ luôn auto-resume + chỉ đạo tồn."""
+        try:
+            try:
+                self._agent.stop(hard=hard)
+            except TypeError:
+                self._agent.stop()
+        except Exception:
+            pass
+        try:
+            self.manager.interrupt()
+        except Exception:
+            pass
+        drained = 0
+        while True:
+            try:
+                k, _ = self.q.get_nowait()
+            except Exception:
+                break
+            if k == "quit":
+                self.q.put(("quit", None))
+                break
+            if k == "task":
+                drained += 1
+        self._pending = 0
+        if hard:
+            _p("⏹ Dừng cứng (ESC×2) — bỏ auto-chạy tiếp + chỉ đạo tồn.", "ye")
+        else:
+            _p(f"⏹ Đang dừng agent…{(f' (đã bỏ {drained} câu chờ)' if drained else '')} — ESC lần nữa để dừng cứng.", "ye")
+
+    def _input_line(self, prompt):
+        """Nhập 1 dòng, bắt ESC ngay không cần Enter (kiểu opencode session_interrupt).
+        - Rảnh + ESC: xóa dòng đang gõ (không submit).
+        - Bận + ESC 1 lần: dừng mềm; ESC lần 2 trong 0.8s: dừng cứng.
+        - Fallback input() thường khi không phải tty hoặc thiếu termios."""
+        try:
+            if not sys.stdin.isatty():
+                return input(prompt).strip()
+        except Exception:
+            try:
+                return input(prompt).strip()
+            except Exception:
+                return ""
+        try:
+            import termios as _tm, tty as _ty, select as _sel
+        except Exception:
+            try:
+                return input(prompt).strip()
+            except Exception:
+                return ""
+        try:
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+        except Exception:
+            pass
+        buf = []
+        try:
+            fd = sys.stdin.fileno()
+            old = _tm.tcgetattr(fd)
+        except Exception:
+            try:
+                return input("").strip()
+            except Exception:
+                return ""
+        try:
+            _ty.setcbreak(fd)
+            while True:
+                try:
+                    rl, _, _ = _sel.select([sys.stdin], [], [], 0.1)
+                except Exception:
+                    rl = [sys.stdin]
+                if not rl:
+                    continue
+                try:
+                    ch = sys.stdin.read(1)
+                except Exception:
+                    continue
+                if not ch:
+                    continue
+                if ch in ("\r", "\n"):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "".join(buf).strip()
+                if ch == "\x03":  # Ctrl+C
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    raise KeyboardInterrupt
+                if ch == "\x04":  # Ctrl+D
+                    if not buf:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        raise EOFError
+                    continue
+                if ch in ("\x7f", "\x08"):  # Backspace
+                    if buf:
+                        buf.pop()
+                        try:
+                            sys.stdout.write("\b \b")
+                            sys.stdout.flush()
+                        except Exception:
+                            pass
+                    continue
+                if ch == "\x1b":  # ESC — phân biệt ESC lẻ vs phím mũi tên
+                    try:
+                        rl2, _, _ = _sel.select([sys.stdin], [], [], 0.05)
+                    except Exception:
+                        rl2 = []
+                    if rl2:
+                        # Escape sequence (mũi tên/F-key...) → nuốt hết, không chèn rác
+                        try:
+                            while _sel.select([sys.stdin], [], [], 0.02)[0]:
+                                sys.stdin.read(1)
+                        except Exception:
+                            pass
+                        continue
+                    now = time.time()
+                    double = (now - (self._last_esc or 0)) <= 0.8
+                    self._last_esc = now
+                    if self._busy:
+                        self._request_stop(hard=double)
+                        buf = []
+                        try:
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                            sys.stdout.write(prompt)
+                            sys.stdout.flush()
+                        except Exception:
+                            pass
+                        continue
+                    # rảnh: ESC = xóa dòng (opencode) rồi gõ tiếp
+                    if buf:
+                        buf = []
+                        try:
+                            sys.stdout.write("\r\033[K")
+                            sys.stdout.write(prompt)
+                            sys.stdout.flush()
+                        except Exception:
+                            pass
+                    continue
+                try:
+                    o = ord(ch)
+                except Exception:
+                    o = 32
+                if o < 32:
+                    continue  # bỏ control char khác
+                buf.append(ch)
+                try:
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+        finally:
+            try:
+                _tm.tcsetattr(fd, _tm.TCSADRAIN, old)
+            except Exception:
+                pass
 
     # ── sự kiện từ agent (chạy trong worker thread) ──
     # Trình bày theo kiểu timeline opencode: mỗi tool = 1 dòng "✓ Bash — $ ls -la"
@@ -385,9 +547,7 @@ class Repl:
             if self._live_kind == "thinking":
                 self._status_msg = "đang suy luận"
         elif t == "retry":
-            attempt = ev.get("attempt", 1)
-            if attempt <= 1 or attempt % 2 == 0:
-                self._set_status(f"thử lại ({attempt}/5)...")
+            self._set_status("Groq quá tải — đang thử lại…")
         elif t == "turn":
             self._set_status("tiếp tục xử lý…")
         elif t == "turn_roll":
@@ -529,13 +689,33 @@ class Repl:
                     out = self._agent.run(payload)
                 except Exception as e:
                     out = f"[LỖI] {type(e).__name__}: {e}"
-                # TỰ ĐỘNG chạy tiếp nếu bị cắt giữa chừng (hết giờ/quota/bước) —
-                # không bắt người dùng gõ 'tiếp tục'. /stop thì tôn trọng, không tự làm tiếp.
+                # TỰ ĐỘNG chạy tiếp nếu bị cắt giữa chừng (quota/bước) — không bắt
+                # người dùng gõ 'tiếp tục'. Hết giờ (time) thì KHÔNG tự chạy tiếp
+                # (task quá lớn, chạy tiếp sẽ hết giờ nữa → vòng lặp treo 40 phút
+                # như log lỗi); trả kết quả dở + hướng dẫn gõ 'tiếp tục'.
+                # /stop (user) và dừng cứng ESC×2 thì tôn trọng, không tự làm tiếp.
                 auto_runs = 0
                 quota_streak = 0
+                try:
+                    _hard = bool(self._agent.hard_abort.is_set())
+                except Exception:
+                    _hard = False
+                if _hard:
+                    pk0 = self._pause_kind(out)
+                    if pk0:
+                        _p("Đã dừng cứng — bỏ auto-chạy tiếp.", "ye")
                 while auto_runs < AUTO_RESUME_MAX:
                     pk = self._pause_kind(out)
                     if not pk or pk == "user":
+                        break
+                    try:
+                        if bool(self._agent.hard_abort.is_set()):
+                            _p("Đã dừng cứng — bỏ auto-chạy tiếp.", "ye")
+                            break
+                    except Exception:
+                        pass
+                    if pk == "time":
+                        _p("Hết giờ lượt này — giữ tiến độ, gõ 'tiếp tục' để chạy nốt (không tự chạy tiếp để tránh treo).", "ye")
                         break
                     if pk == "quota":
                         quota_streak += 1
@@ -554,11 +734,17 @@ class Repl:
                 if auto_runs >= AUTO_RESUME_MAX:
                     _p(f"Đã tự chạy tiếp {AUTO_RESUME_MAX} lần chưa xong — nếu vẫn kẹt hãy báo lại bằng /stop.", "ye")
                 # CHỈ ĐẠO TỒN: lệnh gõ đúng lúc agent vừa xong bước cuối → làm tiếp luôn.
-                # Gộp 1 lần duy nhất, tối đa 5 chỉ đạo — thừa thì bỏ + báo (chống tồn 40 lệnh
-                # như log lỗi do paste rác terminal).
+                # Dừng cứng (ESC×2) thì bỏ luôn để trả máy ngay (opencode hard abort).
                 try:
-                    _left = self._agent._drain_notes()
+                    _hard2 = bool(self._agent.hard_abort.is_set())
                 except Exception:
+                    _hard2 = False
+                try:
+                    _left = [] if _hard2 else self._agent._drain_notes()
+                except Exception:
+                    _left = []
+                if _hard2 and _left:
+                    _p("Đã dừng cứng — bỏ chỉ đạo tồn.", "ye")
                     _left = []
                 if _left:
                     if len(_left) > 5:
@@ -712,6 +898,33 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         self.q.put(("task", text))
 
     # ── /list: liệt kê macro/skill/chat cũ để chọn số mở ra ─────────────
+    def _stats(self):
+        """Thống kê dùng của session hiện tại (kiểu opencode stats)."""
+        try:
+            msgs = sessions.load(self.sid)
+        except Exception as e:
+            _p(f"[LOI] không đọc được session: {e}", "rd")
+            return
+        nu = sum(1 for m in msgs if m.get("role") == "user")
+        na = sum(1 for m in msgs if m.get("role") == "assistant")
+        tools = [m for m in msgs if m.get("role") == "tool"]
+        chars = sum(len(str(m.get("content") or "")) for m in msgs)
+        cnt = {}
+        for m in tools:
+            n = m.get("name", "?")
+            cnt[n] = cnt.get(n, 0) + 1
+        top = sorted(cnt.items(), key=lambda kv: -kv[1])[:6]
+        try:
+            nkeys = len(groq.keys())
+        except Exception:
+            nkeys = 0
+        _p(f"Session {self.sid} — user:{nu} assistant:{na} tool:{len(tools)} "
+           f"~{chars // 4} tokens (~{chars} ký tự) — Groq keys:{nkeys}", "gr")
+        for n, c in top:
+            _p(f"  {n:20} {c}", "dim")
+        if not msgs:
+            _p("(session trống)", "dim")
+
     def _export(self):
         """Xuất đoạn chat hiện tại ra markdown (lưu ~/.rem_ai/exports/<sid>.md)."""
         try:
@@ -867,6 +1080,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/resume <số>  mở lại đoạn chat cũ trong /list",
                     "/done    dừng ghi macro & lưu (khi đang ⏺ ghi)",
                     "/status  xem extension + tool + session",
+                    "/stats   thống kê dùng: tin nhắn, tool calls, ký tự (kiểu opencode stats)",
                     "/sessions liệt kê session cũ",
                     "/models  xem model đang dùng (chat/compact)",
                     "/new     tạo session mới",
@@ -875,7 +1089,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/build   quay lại preset BUILD",
                     "/auto    tự động — không hỏi (mặc định)",
                     "/safe    hỏi xác nhận trước tool ghi/bash/fetch",
-                    "/stop    dừng agent đang xử lý (giữ session)",
+                    "/stop    dừng agent đang xử lý (giữ session) — hoặc ESC 1 lần (mềm), ESC 2 lần (cứng)",
                     "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
                     "/debug   bật/tắt chế độ gỡ lỗi",
                     "/think   xem đầy đủ suy luận của lần trả lời cuối",
@@ -957,28 +1171,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             self._clear()
         elif cmd == "/stop":
             if self._busy:
-                self._agent.stop()
-                try:
-                    self.manager.interrupt()
-                except Exception:
-                    pass
-                try:
-                    left = self._agent._drain_notes()
-                except Exception:
-                    left = []
-                drained = len(left)
-                while True:
-                    try:
-                        k, _ = self.q.get_nowait()
-                    except Exception:
-                        break
-                    if k == "quit":
-                        self.q.put(("quit", None))
-                        break
-                    if k == "task":
-                        drained += 1
-                self._pending = 0
-                _p(f"⏹  Đang dừng agent…{(f' (đã bỏ {drained} câu/chỉ đạo chờ)' if drained else '')}", "ye")
+                self._request_stop(hard=False)
             else:
                 _p("Agent đang rảnh.", "dim")
         elif cmd == "/rest" or cmd.startswith("/rest "):
@@ -1019,6 +1212,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p("Chế độ TỰ ĐỘNG: không hỏi xác nhận." if on else "Chế độ AN TOÀN: hỏi xác nhận trước tool ghi/bash/fetch.", "gr")
         elif cmd == "/status":
             self._status()
+        elif cmd == "/stats":
+            self._stats()
         elif cmd == "/sessions":
             self._sessions()
         elif cmd == "/new":
@@ -1181,7 +1376,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         card_top = (C["dim"] + "╭─❯ gõ câu hỏi · /list danh mục · /rec ghi thao tác"
                     + C["reset"] + "\n")
         if self._busy:
-            top = (C["dim"] + "╭─❯ đang chạy — gõ để điều chỉnh · /stop để dừng"
+            top = (C["dim"] + "╭─❯ đang chạy — gõ để điều chỉnh · ESC//stop để dừng"
                    + C["reset"] + "\n")
             return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
         if self._pending:
@@ -1212,6 +1407,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 self._header_box()
             except Exception:
                 pass
+            if self.resume_sid:
+                _p(f"Tiếp tục phiên: {self.sid} (giữ context cũ)", "gr")
         self.manager.start_all()
         threading.Thread(target=self._worker, daemon=True).start()
         if self.headless is not None:
@@ -1226,7 +1423,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             try:
                 self._in_input = True
                 try:
-                    line = input(self._prompt_hint()).strip()
+                    line = self._input_line(self._prompt_hint()).strip()
                 finally:
                     self._in_input = False
             except EOFError:
@@ -1237,8 +1434,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             except KeyboardInterrupt:
                 self._in_input = False
                 if self._busy:
-                    _p("\n⏹  Đang dừng agent…", "ye")
-                    self.q.put(("stop", None))
+                    self._request_stop(hard=False)
                     continue
                 _p("\nTạm biệt!", "dim")
                 self.q.put(("quit", None))

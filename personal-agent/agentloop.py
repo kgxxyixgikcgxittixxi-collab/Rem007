@@ -154,6 +154,16 @@ def _sys(manager, sid, cwd, user_text=""):
     agents_section = f"\n\nHƯỚNG DẪN DỰ ÁN (từ AGENTS.md):\n{agents_md}" if agents_md else ""
     skills_section = _load_skills_prompt()
     exp_section = _load_experience_prompt()
+    hist = sessions.load(sid)
+    fresh = not any(m.get("role") in ("assistant", "tool") for m in hist)
+    session_line = (
+        "PHIÊN MỚI: đây là đoạn chat mới, lịch sử trò chuyện TRỐNG. "
+        "CẤM bịa ra chuyện cũ (không nhắc 'như đã nói', không tiếp nối việc không có trong lịch sử)."
+        if fresh else
+        "TIẾP TỤC PHIÊN: lịch sử phía dưới là công việc đang dang dở ở lượt trước. "
+        "Kế thừa đúng dữ liệu đã thu thập (kết quả web, file đã tạo, đường dẫn) — KHÔNG làm lại, "
+        "KHÔNG tự bịa thêm thông tin không có trong lịch sử."
+    )
     return {
         "role": "system",
         "content": (
@@ -162,8 +172,7 @@ def _sys(manager, sid, cwd, user_text=""):
             "(mỗi công cụ chạy trong tiến trình riêng biệt).\n\n"
             f"Hôm nay: {time.strftime('%Y-%m-%d %H:%M')}\n"
             f"Thư mục làm việc: {cwd}\nSession: {sid}\n\n"
-            "PHIÊN MỚI: đây là đoạn chat mới, lịch sử trò chuyện TRỐNG. CẤM bịa ra chuyện cũ "
-            "(không nhắc 'như đã nói', không tiếp nối việc không có trong lịch sử). "
+            f"{session_line} "
             "KINH NGHIỆM/SKILL/HƯỚNG DẪN DỰ ÁN bên dưới là kiến thức chung, KHÔNG phải lịch sử trò chuyện. "
             "Chỉ trả lời đúng câu hỏi hiện tại; chưa đủ thông tin thì dùng tool kiểm tra, không suy đoán.\n\n"
             "CÁC CÔNG CỤ CÓ SẵN:\n"
@@ -249,7 +258,22 @@ def _sys(manager, sid, cwd, user_text=""):
             "Lấy thông tin bằng media_info, cắt media_trim, đổi cỡ Shorts media_scale.\n"
             "- TẢI/ĐỌC nội dung đơn giản: web_search/web_fetch là nhẹ nhất, browser_* chỉ khi cần JS/đăng nhập.\n"
             "- KEY GROQ: nhiều key xoay vòng tự động với circuit breaker — khi Groq trả 429 liên tục agent tự "
-            "cooldown và chuyển key khác; nếu hết key thì báo lỗi rõ, đừng tự thử lại mãi.\n"
+            "cooldown và chuyển key khác; nếu hết key thì báo lỗi rõ, đừng tự thử lại mãi.\n\n"
+            "NGHIÊN CỨU + NGUỒN THẬT (bắt buộc, chống bịa):\n"
+            "- Tác vụ cần thông tin/số liệu/nội dung theo nguồn (bài giảng, đề thi, tin tức, chứng chỉ...): "
+            "BẮT BUỘC gọi web_search hoặc web_fetch TRƯỚC khi viết. Nếu web_fetch báo Cloudflare: chuyển "
+            "sang browser_open rồi browser_content. CẤM tự nghĩ ra nội dung thay cho việc nghiên cứu.\n"
+            "- Chỉ trích dẫn URL/số liệu/tên nguồn THẬT SỰ xuất hiện trong output của web_search/web_fetch "
+            "(hoặc file/bài viết đã đọc) của phiên này. Tuyệt đối CẤM tự bịa tên miền, URL, thư viện, "
+            "bài báo, hay 'nguồn ảnh hưởng'. Nếu chưa đọc trực tiếp → ghi rõ 'chưa đọc trực tiếp', đừng gán.\n"
+            "- Trước khi trả lời có MỤC NGUỒN/THAM KHẢO: rà từng URL lại so với output tool; sai lệch 1 ký tự "
+            "(vd tienganh123 thay vì tienganhmoingay) cũng coi là bịa — phải sửa cho khớp.\n"
+            "- Số liệu (thời gian, số câu, mức điểm chuẩn): chỉ dùng đúng số từ nguồn; không tự 'chốt' con số.\n"
+            "- PDF/ấn phẩm cần ảnh minh hoạ: dùng web_images('chủ đề bằng tiếng Anh') để lấy URL ảnh THẬT, "
+            "rồi web_download_images tải về và nhúng vào PDF bằng reportlab Image(đường dẫn). "
+            "TUYỆT ĐỐI KHÔNG dùng media_image (sinh AI) cho ảnh minh hoạ PDF, không tự vẽ. "
+            "Mỗi ảnh nên có caption nguồn URL. Muốn PDF lớn thì tải NHIỀU ảnh độ phân giải cao "
+            "(cứ ~40-60 ảnh JPEG 150-400KB là đạt ~10MB), không cần nén."
             f"{agents_section}"
             f"{skills_section}"
             f"{exp_section}"
@@ -266,6 +290,7 @@ class Agent:
         self.askfn = None
         self.on_event = on_event
         self.cancel = threading.Event()
+        self.hard_abort = threading.Event()  # ESC đúp → dừng cứng, bỏ auto-resume
         self._error_patterns = {}  # pattern -> count (self-healing: track recurring errors)
         self._tool_fingerprints = set()  # track which tools have been called with what args
         self._task_hash = ""  # fingerprint of current task for resume
@@ -280,8 +305,17 @@ class Agent:
             except Exception:
                 pass
 
-    def stop(self):
+    def stop(self, hard=False):
+        """Dừng task đang chạy (kiểu opencode session_interrupt).
+        soft (ESC 1 lần//stop): cancel event → LLM/tool hủy ở biên lượt, được wrap-up.
+        hard (ESC 2 lần): thêm cờ hard_abort → bỏ luôn auto-resume + chỉ đạo tồn,
+        trả ngay không làm tiếp."""
         self.cancel.set()
+        if hard:
+            try:
+                self.hard_abort.set()
+            except Exception:
+                pass
         try:
             with self._live_lock:
                 self.live_notes = []
@@ -418,6 +452,10 @@ class Agent:
     def run(self, user_text):
         """Chạy agent với self-healing: tự detect loop, tự recover lỗi, tự validate kết quả."""
         self.cancel.clear()
+        try:
+            self.hard_abort.clear()
+        except Exception:
+            pass
         self._error_patterns.clear()
         self._tool_fingerprints.clear()
         self._last_steps = []
@@ -439,7 +477,7 @@ class Agent:
                     "ở các bước trước. Xem lịch sử phía trên để biết tiến độ, rồi dùng tool "
                     "để làm nốt và KẾT THÚC khi xong."
                 )}, *msgs]
-                msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline))
+                msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline), cancel=self.cancel)
                 msgs = sessions.trim(msgs)
             for step in range(MAX_STEPS):
                 stopped = self._check_stop(deadline)
@@ -454,45 +492,58 @@ class Agent:
                     sessions.append(self.sid, _nm)
                     msgs.append(dict(_nm))
                 self._emit({"type": "thinking", "step": step + 1, "turn": turn})
-                msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline))
+                msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline), cancel=self.cancel)
                 msgs = sessions.trim(msgs)
                 self._emit({"type": "llm", "step": step + 1, "turn": turn})
                 reply = None
                 step_deadline = time.time() + _STEP_BUDGET
-                for retry_i in range(5):
+                # Groq quá tải/rần thì retry vô ích: giới hạn 3 lần, mỗi lần tính
+                # theo BUDGET CÒN LẠI của bước (fail-fast theo deadline, không treo).
+                for retry_i in range(3):
                     stopped = self._check_stop(deadline)
                     if stopped:
                         return self._finish(user_text, stopped)
+                    remaining = step_deadline - time.time()
+                    if remaining <= 3:
+                        break
+                    if retry_i > 0:
+                        # Chỉ báo 1 lần duy nhất (không spam "thử lại 1/5, 2/5, 4/5"
+                        # như log lỗi) — spinner/status tự chuyển nếu có dữ liệu mới.
+                        if retry_i == 1:
+                            self._emit({"type": "retry", "attempt": 1})
                     reply = groq.chat_stream(
                         msgs, tools=self.manager.schemas() or None,
-                        budget=_budget(deadline, step_deadline),
+                        budget=min(_budget(deadline, step_deadline), max(15, remaining)),
                         on_delta=lambda ev: self._emit({"type": "stream_delta", "kind": ev["type"], "text": ev.get("text", "")}),
+                        cancel=self.cancel,
                     )
                     if reply:
                         break
-                    # Tiến trình KHÔNG mất: mọi kết quả tool đã append vào sessions DB
-                    # ngay sau mỗi tool; retry LLM chỉ giữ nguyên msgs và thử lại.
+                    # ESC//stop trong lúc chờ LLM → dừng ngay, không retry vô ích
+                    if self.cancel.is_set():
+                        return self._finish(user_text, "[ĐÃ DỪNG] theo yêu cầu của người dùng.")
                     try:
                         wait = groq.rate_wait_remaining()
                     except Exception:
                         wait = 0
-                    if retry_i < 4:  # chi hien retry o 4 lan dau, lan cuoi bo qua
-                        if wait > 1:
-                            self._emit({"type": "retry", "attempt": retry_i + 1, "wait": round(wait, 1)})
-                        else:
-                            self._emit({"type": "retry", "attempt": retry_i + 1})
-                    if self.cancel.wait(min(2 * (retry_i + 1), 12)):
-                        return self._finish(user_text, "[DUNG] theo yeu cau cua nguoi dung.")
+                    if wait > 2:
+                        # Org-level 429 đang active → chờ đúng Retry-After rồi thử,
+                        # không sleep tràn qua hết budget bước
+                        if self.cancel.wait(min(wait, 4)):
+                            return self._finish(user_text, "[ĐÃ DỪNG] theo yêu cầu của người dùng.")
                 if not reply:
-                    if time.time() < deadline - 5:
-                        try:
-                            sessions.checkpoint(self.sid, step + 1, msgs,
-                                                summary=f"task={self._task_hash} llm_retry turn={turn} step={step+1}")
-                        except Exception:
-                            pass
-                        time.sleep(1)
-                        continue
-                    return self._finish(user_text, "[TAM DUNG] Groq dang qua tai/quota het — het thoi gian luot nay, cong viec chua xong. Go 'tiep tuc' de chay not doan con dang do.")
+                    # Không có phản hồi → đáng ngờ. Nếu hết giờ thì dừng rõ ràng
+                    # (không tự 'continue' đốt thêm bước).
+                    if time.time() >= deadline - 5:
+                        return self._finish(user_text, "[TẠM DỪNG] Groq quá tải hoặc mất kết nối — gõ 'tiếp tục' để chạy lại.")
+                    try:
+                        sessions.checkpoint(self.sid, step + 1, msgs,
+                                            summary=f"task={self._task_hash} turn={turn} step={step+1}")
+                    except Exception:
+                        pass
+                    if self.cancel.wait(1):
+                        return self._finish(user_text, "[ĐÃ DỪNG] theo yêu cầu của người dùng.")
+                    continue
                 tool_calls = reply.get("tool_calls") or []
                 if not tool_calls:
                     if turn > 1:

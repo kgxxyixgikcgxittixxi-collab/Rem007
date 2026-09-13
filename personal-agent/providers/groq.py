@@ -208,6 +208,11 @@ def seed_defaults():
 _MODELS = {"items": None, "at": 0.0}
 _MODEL_URL = "https://api.groq.com/openai/v1/models"
 
+# Groq KHÔNG bị chặn ở VN → đi thẳng, KHÔNG qua proxy xray 127.0.0.1:1090.
+# (xray restart ~10s là mọi request Groq qua proxy đều ProxyError — log 13/09 10:06.)
+# requests với proxies={http:None,https:None} sẽ bỏ qua env HTTP(S)_PROXY.
+_DIRECT = {"http": None, "https": None}
+
 
 def models(force=False):
     """Trả dict các model khả dụng từ API Groq, cache 5 phút."""
@@ -218,7 +223,7 @@ def models(force=False):
     ks = keys()
     for k in ks[:3]:
         try:
-            r = requests.get(_MODEL_URL, headers={"Authorization": f"Bearer {k}"}, timeout=12)
+            r = requests.get(_MODEL_URL, headers={"Authorization": f"Bearer {k}"}, timeout=12, proxies=_DIRECT)
             if r.status_code == 200:
                 _MODELS["items"] = {m["id"] for m in r.json().get("data", [])}
                 _MODELS["at"] = now
@@ -261,6 +266,31 @@ _NET_ERRS = ("ReadTimeout", "ConnectTimeout", "ConnectionError", "ReadError",
 # Lỗi 5xx/408: server quá tải → backoff ngắn + jitter rồi thử tiếp (không đốt cooldown)
 _SERVER_ERRS = (500, 502, 503, 504, 408)
 
+
+def _is_cancelled(cancel):
+    """True nếu user đã ESC//stop (kiểu opencode session_interrupt)."""
+    try:
+        return bool(cancel is not None and cancel.is_set())
+    except Exception:
+        return False
+
+
+def _sleep_cancel(secs, cancel=None, end=None):
+    """Ngủ theo lát 0.2s để ESC//stop ngắt ngay (≤0.2s) thay vì treo hết timeout.
+    Trả True nếu bị hủy/hết giờ (caller nên return None ngay)."""
+    try:
+        secs = max(0.0, min(float(secs or 0), 15.0))
+    except Exception:
+        return True
+    t0 = time.time()
+    while (time.time() - t0) < secs:
+        if _is_cancelled(cancel):
+            return True
+        if end is not None and time.time() >= end:
+            return True
+        time.sleep(min(0.2, max(0.0, secs - (time.time() - t0))))
+    return bool(_is_cancelled(cancel) or (end is not None and time.time() >= end))
+
 _STATS_FILE = os.path.join(DIR, "key_stats.json")
 _STATS_SAVE_EVERY = 20      # lưu stats sau mỗi N sự kiện báo cáo (tránh ghi nhiều)
 
@@ -292,6 +322,7 @@ class KeyManager:
 
     def __init__(self):
         self._rr = 0
+        self._rotations = 0      # số lần đổi key cứu lượt: 429 key A → thành công bằng key B
         self._stats = {}        # key -> dict thống kê
         self._rpm_hist = {}     # key -> deque timestamps request (token bucket)
         self._lock = threading.Lock()
@@ -305,8 +336,10 @@ class KeyManager:
         self._RPM_SAFE = 26              # token bucket: tối đa yêu cầu/phút mỗi key (Groq ~30)
         self._RPM_WINDOW = 60.0
         self._AUTH_COOLDOWN = 3600       # key 401/403 → đóng 1 giờ
-        # key bị cạn quota cửa sổ (429 nhiều liên tiếp) → cooldown dài (gần như nghỉ hôm nay)
-        self._EXHAUST_COOLDOWN = 1800
+        # key bị cạn quota cửa sổ (429 nhiều liên tiếp) → cooldown vừa phải, KHÔNG 30 phút.
+        # Groq miễn phí reset theo phút (RPU/RPM window) → khóa 90s là đủ chờ cửa sổ mới.
+        # Xoay 23 key: key nào hết cửa sổ chỉ cần nghỉ ngắn, không phải nghỉ nguyên ngày.
+        self._EXHAUST_COOLDOWN = 90
 
     def _get_stats(self, key):
         s = self._stats.setdefault(key, {
@@ -412,7 +445,18 @@ class KeyManager:
                     if n < best_score:
                         best_score = n
                         best_key = k
-            return best_key, best_wait
+            # Không ngủ cả phút chờ 1 key: trả wait tối đa 3s, vừa đủ chờ hoán đổi —
+            # 23 key nên ưu tiên XOAY sang key khác ngay hơn là chờ key đang cooldown.
+            return best_key, min(best_wait, 3.0)
+
+    def note_rotation(self):
+        """Ghi nhận: cùng 1 yêu cầu gặp 429 nhưng XOAY key khác thành công."""
+        with self._lock:
+            self._rotations += 1
+
+    def rotation_count(self):
+        with self._lock:
+            return self._rotations
 
     def report_success(self, key):
         with self._lock:
@@ -441,20 +485,21 @@ class KeyManager:
             s["rate_streak"] += 1
             s["last_fail"] = time.time()
             ra = _parse_retry_after(retry_after)
-            base = ra if ra else self._COOLDOWN_DEFAULT
-            base = max(self._COOLDOWN_BASE, base)
-            # leo thang: 429 liên tiếp → cooldown mỗi lần thêm (quota cửa sổ gần cạn)
-            if s["rate_streak"] >= 3:
+            # Có Retry-After cụ thể (per-key/org thật) → tin server, khóa ĐÚNG thời gian đó.
+            # Groq miễn phí trả Retry-After theo cửa sổ phút → khóa ngắn là hiệu quả nhất.
+            if ra:
+                s["cooldown_until"] = time.time() + min(max(ra, 15), 300)
+                s["cooldown_reason"] = f"retry-after {ra}s"
+            elif s["rate_streak"] >= 3:
                 s["cooldown_until"] = time.time() + self._EXHAUST_COOLDOWN
                 s["cooldown_reason"] = "exhausted"
                 s["rate_streak"] = 0
             elif s["rate_streak"] >= 2:
-                s["cooldown_until"] = time.time() + min(base + s["rate_streak"] * self._COOLDOWN_SCALE, self._COOLDOWN_MAX)
+                s["cooldown_until"] = time.time() + min(self._COOLDOWN_DEFAULT + s["rate_streak"] * self._COOLDOWN_SCALE, self._COOLDOWN_MAX)
                 s["cooldown_reason"] = f"rate streak={s['rate_streak']}"
             else:
                 # 429 lẻ tẻ (streak 1) → chỉ nghỉ ngắn, tránh cấm oan cả phút
-                # (trước đây 1 phát 429 đã cooldown 50-110s, cả pool cùng dính)
-                s["cooldown_until"] = time.time() + (ra if ra else 10.0)
+                s["cooldown_until"] = time.time() + 10.0
                 s["cooldown_reason"] = "rate 1 lần"
         self._save()
 
@@ -540,8 +585,92 @@ def _note_org_rate(retry_after=None):
         return wait
 
 
-def _post(body, model, timeout=30, budget=None):
-    """Gọi Groq với KeyManager: weighted key selection, circuit breaker, smart retry."""
+def _post_cancelable(url, headers, payload, timeout, cancel=None, stream=False, end=None):
+    """POST chặn ≤0.5s/lát để ESC ngắt ngay (kiểu opencode hard abort).
+    requests.post chặn nguyên khối tới `timeout` giây nên chạy trong daemon thread,
+    luồng chính poll cancel mỗi 0.2s. Hủy → bỏ kết quả nền, return (None, True).
+    timeout có thể là số (giây) hoặc tuple (connect, read) — stream luôn dùng tuple ngắn.
+    end (mốc tuyệt đối) → không bao giờ chờ quá mốc đó (fail-fast khi Groq chậm)."""
+    box = {}
+
+    def _do():
+        try:
+            box["r"] = requests.post(
+                url, headers=headers, json=payload,
+                timeout=timeout, proxies=_DIRECT, stream=stream,
+            )
+        except Exception as e:
+            box["e"] = e
+
+    th = threading.Thread(target=_do, daemon=True)
+    th.start()
+    # tổng chờ tối đa = read-timeout + đệm (tránh thread kẹt treo luôn lượt)
+    try:
+        tmax = (timeout[1] if isinstance(timeout, (list, tuple)) else timeout) + 5
+    except Exception:
+        tmax = 40
+    if end is not None:
+        tmax = min(tmax, max(0.0, end - time.time()))
+    waited = 0.0
+    while th.is_alive():
+        if _is_cancelled(cancel):
+            return None, True
+        if waited >= tmax:
+            return None, False
+        th.join(timeout=0.2)
+        waited += 0.2
+    if "r" in box:
+        return box["r"], False
+    box_e = box.get("e")
+    if box_e is not None:
+        raise box_e
+    return None, False
+
+
+# Model nào timeout mạng 2 lần liên tiếp → nghỉ 5 phút (đừng hammer model chậm,
+# xoay sang model nhanh hơn ngay — hết treo 70s×5 lần như log lỗi).
+_SLOW = {}
+_SLOW_LOCK = threading.Lock()
+
+
+def _slow_cooldown(model):
+    try:
+        with _SLOW_LOCK:
+            return _SLOW.get(model, 0) > time.time()
+    except Exception:
+        return False
+
+
+def _note_slow(model):
+    try:
+        with _SLOW_LOCK:
+            n = _SLOW.get(model + "#n", 0) + 1
+            _SLOW[model + "#n"] = n
+            if n >= 2:
+                _SLOW[model] = time.time() + 300
+                _SLOW[model + "#n"] = 0
+    except Exception:
+        pass
+
+
+def _note_fast(model):
+    try:
+        with _SLOW_LOCK:
+            _SLOW.pop(model, None)
+            _SLOW.pop(model + "#n", None)
+    except Exception:
+        pass
+
+
+def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
+    """Gọi Groq với KeyManager: weighted key selection, circuit breaker, smart retry.
+    cancel: threading.Event của ESC//stop → hủy trong ≤0.5s (không treo hết timeout).
+    stream: True → requests stream + timeout (connect, read) ngắn để ReadTimeout
+      không treo 70s; model timeout 2 lần → nghỉ 5 phút, xoay model khác ngay."""
+    if _is_cancelled(cancel):
+        return None
+    if _slow_cooldown(model):
+        return None
     body = dict(body)
     effort = os.environ.get("REM_REASONING", "low").strip().lower()
     if model.startswith("openai/gpt-oss") and effort in ("low", "medium", "high"):
@@ -551,49 +680,63 @@ def _post(body, model, timeout=30, budget=None):
         return None
     last = None
     attempts = 0
-    rate_hits = 0
-    max_attempts = min(len(ks) + 4, 16)  # xoay key nhưng chặn hammer khi 429 org-level
+    saw_rate = False  # lượt này đã gặp 429 key nào chưa (để đếm rotation cứu lượt)
+    max_attempts = min(len(ks) + 4, 16)  # xoay 23 key độc lập; không khóa pool khi 1 key 429
     end = time.time() + (budget if budget and budget > 0 else 75)
     import random as _rd
+    # Stream: chờ connect 10s + giữa các chunk 30s là đủ (Groq thường trả chunk <5s).
+    # Non-stream (text/vision/chat): (10, 25). Không còn timeout 70s treo lượt.
+    if stream:
+        tmo = (10, 30)
+    elif isinstance(timeout, (list, tuple)):
+        tmo = tuple(timeout)
+    else:
+        try:
+            tmo = (10, max(15, min(int(timeout), 25)))
+        except Exception:
+            tmo = (10, 25)
     while time.time() < end and attempts < max_attempts:
-        # Org-level 429 đang active → chờ 1 lần duy nhất, không thử từng key vô ích
-        rem = rate_wait_remaining()
-        if rem > 1:
-            time.sleep(min(rem, max(0.5, end - time.time()), 15))
-            continue
+        if _is_cancelled(cancel):
+            return None
         attempts += 1
         choice, wait = _km.pick_key(ks)
         if choice is None:
             break
         if wait > 0:
-            time.sleep(min(wait, max(0.5, end - time.time())))
+            if _sleep_cancel(min(wait, max(0.5, end - time.time())), cancel, end):
+                return None
             continue
-        to = max(1, min(timeout, int(end - time.time() + 1)))
         try:
-            r = requests.post(
+            r, was_cancel = _post_cancelable(
                 "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {choice}"},
-                json={"model": model, **body}, timeout=to,
+                {"Authorization": f"Bearer {choice}"},
+                {"model": model, **body}, tmo, cancel, stream=stream, end=end,
             )
+            if was_cancel:
+                return None
+            if r is None:
+                last = "TIMEOUT"
+                _note_slow(model)
+                continue
             if r.status_code == 200:
                 _km.report_success(choice)
+                if saw_rate:
+                    _km.note_rotation()  # 429 key này → thành công bằng key khác = XOAY CỨU LƯỢT
+                _note_fast(model)
                 return r
             if r.status_code in _RATE:
                 retry = r.headers.get("retry-after")
                 _km.report_rate_limit(choice, retry)
-                _note_org_rate(retry)
-                rate_hits += 1
+                # Key ĐỘC LẬP (thực nghiệm: key A 429 nhưng key B vẫn 200) →
+                # chỉ đánh dấu key đó nghỉ ngắn, KHÔNG khóa cả pool, xoay key khác ngay.
+                saw_rate = True
                 last = "RATE"
-                # Nhiều key liên tiếp cùng 429 = giới hạn org → ngủ 1 lần rồi thử tiếp
-                if rate_hits >= 3:
-                    rem = rate_wait_remaining()
-                    if rem > 1:
-                        time.sleep(min(rem, max(0.5, end - time.time()), 20))
-                    rate_hits = 0
+                continue
             elif r.status_code in _SERVER_ERRS:
                 # server quá tải → chờ ngắn + jitter rồi thử key khác (không chặn key)
                 wait = min(2 ** min(attempts, 4), 8) * _rd.uniform(0.7, 1.3)
-                time.sleep(min(wait, max(0.2, end - time.time())))
+                if _sleep_cancel(min(wait, max(0.2, end - time.time())), cancel, end):
+                    return None
                 _km.report_failure(choice, is_server=True)
                 last = f"HTTP {r.status_code}"
                 continue
@@ -604,18 +747,29 @@ def _post(body, model, timeout=30, budget=None):
                     break
                 _km.report_failure(choice)
         except Exception as e:
+            if _is_cancelled(cancel):
+                return None
             last = type(e).__name__
             _km.report_failure(choice, is_network=True)
+            if last in ("ReadTimeout", "ConnectTimeout"):
+                # Model chậm/kẹt → ghi slow (2 lần là nghỉ 5p), KHÔNG sleep hammer
+                # lại model đó; vòng sau chat_stream xoay sang model khác ngay.
+                _note_slow(model)
+                continue
             if last in _NET_ERRS:
-                time.sleep(0.5 * _rd.uniform(0.7, 1.3))  # brief jittered backoff
+                if _sleep_cancel(0.5 * _rd.uniform(0.7, 1.3), cancel, end):
+                    return None
     if last == "RATE":
         return "RATE"
     if last and (last not in _SERVER_ERRS):
-        print(f"[groq] that bai ({model}): {last}", file=__import__("sys").stderr)
+        # Timeout lẻ tẻ giữa nhiều model là bình thường (đã xoay model khác) —
+        # chỉ báo khi không còn là timeout để khỏi spam log như ảnh lỗi.
+        if last not in ("TIMEOUT", "ReadTimeout", "ConnectTimeout"):
+            print(f"[groq] that bai ({model}): {last}", file=__import__("sys").stderr)
     return None
 
 
-def chat(msgs, tools=None, budget=None):
+def chat(msgs, tools=None, budget=None, cancel=None):
     """Trả về message của model đầu tiên trả lời được trong khung thời gian budget."""
     body = {"messages": msgs, "max_tokens": 16384}
     if tools:
@@ -624,13 +778,17 @@ def chat(msgs, tools=None, budget=None):
     chain = chat_models() + [m for m in fb_models() if m not in chat_models()]
     end = time.time() + (budget if budget and budget > 0 else 75)
     for attempt in range(3):
-        if time.time() >= end:
+        if time.time() >= end or _is_cancelled(cancel):
             return None
         all_rate = True
         for m in chain[:5]:
-            if time.time() >= end:
+            if time.time() >= end or _is_cancelled(cancel):
                 break
-            r = _post(body, m, budget=max(1, end - time.time()))
+            if _slow_cooldown(m):
+                continue
+            r = _post(body, m, budget=max(1, end - time.time()), cancel=cancel)
+            if _is_cancelled(cancel):
+                return None
             if r == "RATE":
                 continue
             if r is not None:
@@ -638,7 +796,8 @@ def chat(msgs, tools=None, budget=None):
             all_rate = False
         if all_rate:
             wait = min(1 + attempt, 4)
-            time.sleep(max(0.0, min(wait, end - time.time())))
+            if _sleep_cancel(max(0.0, min(wait, end - time.time())), cancel, end):
+                return None
             continue
         return None
     return None
@@ -670,9 +829,12 @@ def _parse_xml_tools(content):
     return calls
 
 
-def _iter_stream(r, on_delta):
+def _iter_stream(r, on_delta, cancel=None):
     """Tiêu thụ response stream Groq → message cuối. on_delta(ev) nhận
-    {"type":"content"|"thinking","text":...} để UI hiện tiến độ chữ trực tiếp."""
+    {"type":"content"|"thinking","text":...} để UI hiện tiến độ chữ trực tiếp.
+    cancel (ESC//stop) → dừng đọc ngay, trả phần đã nhận (không mất chữ).
+    Stall >30s không chunk (ReadTimeout từ requests) → cũng trả phần đã nhận
+    thay vì return None mất trắng như bản cũ."""
     acc = {"content": "", "thinking": "", "tc": []}
 
     def emit(kind, s):
@@ -684,6 +846,8 @@ def _iter_stream(r, on_delta):
 
     try:
         for raw in r.iter_lines():
+            if _is_cancelled(cancel):
+                break
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace")
@@ -713,7 +877,7 @@ def _iter_stream(r, on_delta):
                 acc["tc"][idx]["name"] += fn.get("name") or ""
                 acc["tc"][idx]["args"] += fn.get("arguments") or ""
     except Exception:
-        return None
+        pass  # stall/timeout giữa stream → giữ phần đã nhận, không mất trắng
     finally:
         try:
             r.close()
@@ -749,52 +913,102 @@ def _iter_stream(r, on_delta):
     return None
 
 
-def chat_stream(msgs, tools=None, budget=None, on_delta=None):
+def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
     """Gọi Groq dạng STREAM — UI thấy chữ/tiến độ đang chảy, không bị 'treo im'.
     Trả message cuối giống chat(), kèm on_delta để cập nhật tiến độ.
-    max_tokens 4096 (~5KB/lần): mỗi phản hồi nhỏ → chạy hết trong timeout, KHÔNG bị cắt
-    giữa stream như các phản hồi cồng kềnh; file lớn model tự ghi thành nhiều phần nhỏ."""
-    body = {"messages": msgs, "max_tokens": 4096, "stream": True}
+    max_tokens 8192: phản hồi lớn (tool_calls + suy luận) không bị cắt giữa chừng.
+    Có thể ép model qua env REM_MODEL=openai/gpt-oss-20b.
+    cancel: ESC//stop hủy trong ≤0.5s. Model chậm (timeout 2 lần) bị bỏ qua 5 phút,
+    xoay sang model nhanh ngay thay vì treo 70s×5 như bản cũ."""
+    body = {"messages": msgs, "max_tokens": 8192, "stream": True}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
     chain = chat_models() + [m for m in fb_models() if m not in chat_models()]
+    ov = os.environ.get("REM_MODEL", "").strip()
+    if ov:
+        chain = [ov] + [m for m in chain if m != ov]
     end = time.time() + (budget if budget and budget > 0 else 75)
-    for attempt in range(3):
-        if time.time() >= end:
+    for attempt in range(6):
+        if time.time() >= end or _is_cancelled(cancel):
             return None
         all_rate = True
-        rate_models = 0
+        skipped_slow = 0
         for m in chain[:5]:
-            if time.time() >= end:
+            if time.time() >= end or _is_cancelled(cancel):
                 break
-            r = _post(body, m, budget=max(1, end - time.time()), timeout=70)
+            if _slow_cooldown(m):
+                skipped_slow += 1
+                continue
+            r = _post(body, m, budget=max(1, end - time.time()), timeout=(10, 30),
+                      cancel=cancel, stream=True)
+            if _is_cancelled(cancel):
+                return None
             if r == "RATE":
-                rate_models += 1
-                # Đã 2 model cùng 429 = giới hạn org → chờ 1 lần, khỏi thử 3 model còn lại vô ích
-                if rate_models >= 2:
-                    rem = rate_wait_remaining()
-                    if rem > 2 and time.time() < end:
-                        time.sleep(min(rem, max(0.5, end - time.time()), 12))
+                # Key độc lập → 429 1 key chỉ cần xoay: thử model kế tiếp ngay
+                # (mỗi model lại xoay qua 23 key ở _post). KHÔNG ngủ chờ org.
                 continue
             if r is None:
                 all_rate = False
                 continue
             all_rate = False
-            return _iter_stream(r, on_delta)
+            if cancel is not None:
+                # Đóng response khi ESC//stop để iter_lines đang chặn bung ngay
+                # (nếu không, hủy phải chờ chunk kế tiếp mới check được).
+                try:
+                    import weakref as _wr
+                    _rref = _wr.ref(r)
+                    _cev = cancel
+                    def _closer(_rr=_rref, _cc=_cev):
+                        try:
+                            while not _cc.is_set():
+                                time.sleep(0.1)
+                            _ro = _rr()
+                            if _ro is not None:
+                                try:
+                                    _ro.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    threading.Thread(target=_closer, daemon=True).start()
+                except Exception:
+                    pass
+            out = _iter_stream(r, on_delta, cancel=cancel)
+            if _is_cancelled(cancel):
+                return None
+            if out is not None:
+                return out
+            # stream stall nhưng chưa có gì → thử model kế tiếp ngay
+            if _is_cancelled(cancel):
+                return None
+            continue
+        if _is_cancelled(cancel):
+            return None
+        # tất cả model chậm/timeout (không phải RATE) → chờ ngắn rồi thử lại,
+        # ưu tiên model nhanh ở vòng sau (slow-cooldown đã loại model kẹt)
         if all_rate:
             wait = min(1 + attempt, 4)  # giam backoff: 1s, 2s, 3s
-            time.sleep(max(0.0, min(wait, end - time.time())))
+            if _sleep_cancel(max(0.0, min(wait, end - time.time())), cancel, end):
+                return None
             continue
+        # hết vòng mà toàn timeout/model-chậm → nghỉ 2s cho model hồi rồi thử tiếp
+        if skipped_slow >= 3 and time.time() < end:
+            if _sleep_cancel(min(2.0, end - time.time()), cancel, end):
+                return None
     return None
 
 
-def text(p, max_tokens=700, temp=0.2, budget=None):
+def text(p, max_tokens=700, temp=0.2, budget=None, cancel=None):
     end = time.time() + (budget if budget and budget > 0 else 75)
     for m in clone_models()[:3]:
-        if time.time() >= end:
+        if time.time() >= end or _is_cancelled(cancel):
             break
-        r = _post({"messages": [{"role": "user", "content": p}], "max_tokens": max_tokens, "temperature": temp}, m, 20, budget=max(1, end - time.time()))
+        if _slow_cooldown(m):
+            continue
+        r = _post({"messages": [{"role": "user", "content": p}], "max_tokens": max_tokens, "temperature": temp}, m, 20, budget=max(1, end - time.time()), cancel=cancel)
+        if _is_cancelled(cancel):
+            return ""
         if r is not None and r != "RATE" and r.status_code == 200:
             content = r.json()["choices"][0]["message"].get("content")
             if content:
@@ -804,7 +1018,7 @@ def text(p, max_tokens=700, temp=0.2, budget=None):
     return ""
 
 
-def vision(q, img, budget=None):
+def vision(q, img, budget=None, cancel=None):
     try:
         d = __import__("base64").b64encode(open(img, "rb").read()).decode()
     except Exception:
@@ -814,9 +1028,13 @@ def vision(q, img, budget=None):
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{d}"}}]}], "max_tokens": 300}
     end = time.time() + (budget if budget and budget > 0 else 75)
     for m in vision_models()[:3]:
-        if time.time() >= end:
+        if time.time() >= end or _is_cancelled(cancel):
             break
-        r = _post(body, m, 25, budget=max(1, end - time.time()))
+        if _slow_cooldown(m):
+            continue
+        r = _post(body, m, 25, budget=max(1, end - time.time()), cancel=cancel)
+        if _is_cancelled(cancel):
+            return None
         if r == "RATE":
             return None
         if r is not None and r.status_code == 200:
