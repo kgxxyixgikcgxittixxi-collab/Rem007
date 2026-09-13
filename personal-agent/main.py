@@ -13,11 +13,16 @@ def main():
     updater.preflight()          # báo / tự cập nhật bản mới từ GitHub
     manager = Manager()
     # headless: Remtm h + "nội dung task" → chạy 1 task rồi tự thoát
+    # resume:   Remtm c <session_id> + "nội dung" → TIẾP TỤC phiên cũ (giữ context, nghiên cứu đã có)
     headless = None
+    resume_sid = None
     args = sys.argv[1:]
-    if len(args) >= 2 and args[0] in ("h", "headless", "--task", "run"):
+    if len(args) >= 3 and args[0] in ("c", "continue", "--continue"):
+        headless = " ".join(args[2:]).strip()
+        resume_sid = args[1]
+    elif len(args) >= 2 and args[0] in ("h", "headless", "--task", "run"):
         headless = " ".join(args[1:]).strip()
-    repl = Repl(manager, headless=headless)
+    repl = Repl(manager, headless=headless, resume_sid=resume_sid)
     try:
         repl.run()
     finally:

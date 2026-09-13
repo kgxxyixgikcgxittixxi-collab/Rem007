@@ -31,7 +31,9 @@ def remote_version(timeout=config.UPDATE_CHECK_TIMEOUT):
     """Version mới nhất trên GitHub (từ raw config.py). None nếu lỗi mạng."""
     try:
         import requests
-        r = requests.get(config.REMOTE_CONFIG, timeout=timeout)
+        # GitHub raw không cần VPN → đi thẳng, tránh sập theo xray lúc restart
+        r = requests.get(config.REMOTE_CONFIG, timeout=timeout,
+                         proxies={"http": None, "https": None})
         r.raise_for_status()
         m = re.search(r'VERSION\s*=\s*["\']([\d.]+)["\']', r.text)
         return m.group(1) if m else None
@@ -102,7 +104,8 @@ def _tarball_pull(lines):
         import requests
         tmp = tempfile.mkdtemp(prefix="rem-update-")
         tgz = os.path.join(tmp, "repo.tar.gz")
-        with requests.get(config.REPO_TARBALL, stream=True, timeout=config.UPDATE_TIMEOUT) as r:
+        with requests.get(config.REPO_TARBALL, stream=True, timeout=config.UPDATE_TIMEOUT,
+                          proxies={"http": None, "https": None}) as r:
             r.raise_for_status()
             with open(tgz, "wb") as f:
                 shutil.copyfileobj(r.raw, f, length=1 << 20)

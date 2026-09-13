@@ -1,4 +1,6 @@
 requests>=2.28
+# Vượt Cloudflare mức TLS/JA3 cho web_fetch (fallback requests → curl_cffi → browser)
+curl_cffi>=0.7
 # Tạo bài thuyết trình PowerPoint (xem examples/presentations/). python-pptx cần lxml.
 # - Debian/Ubuntu/X11: nếu pip báo lỗi build lxml (vd máy ARM không có wheel) thì cài trước:
 #     apt-get install -y python3-lxml     (hoặc:  pkg install -y python-lxml   trên Termux)
@@ -6,6 +8,8 @@ requests>=2.28
 python-pptx>=1.0
 # Trình duyệt tự động (browser_*): Playwright + chromium. Chạy thêm: playwright install chromium
 playwright>=1.40
+# Làm PDF bài giảng minh họa ảnh web (make_big_pdf.py)
+reportlab>=4.0
 # Làm video: TTS tiếng Việt + nói dự phòng
 edge-tts>=6.1
 gTTS>=2.3

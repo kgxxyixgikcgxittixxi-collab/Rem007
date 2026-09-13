@@ -33,6 +33,22 @@ def _need_page():
     return p
 
 
+_CF_TITLE = ("just a moment", "attention required", "verify you are human")
+
+
+def _is_cf_page(page):
+    """True nếu trang đang hiện thử thách Cloudflare/Turnstile."""
+    try:
+        t = (page.title() or "").lower()
+        if any(k in t for k in _CF_TITLE):
+            return True
+        body = (page.inner_text("body") or "")[:2000].lower()
+        return any(k in body for k in ("verify you are human", "just a moment",
+                                      "checking your browser", "cf-challenge", "turnstile"))
+    except Exception:
+        return False
+
+
 def _ensure():
     global _BROWSER, _PAGE
     if _PAGE is not None:
@@ -41,30 +57,36 @@ def _ensure():
     _BROWSER = sync_playwright().start()
     profile = os.path.join(DIR, "browser_profile")
     os.makedirs(profile, exist_ok=True)
+    _args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+             "--disable-blink-features=AutomationControlled",
+             "--disable-automation", "--disable-infobars"]
     try:
-        # persistent context → cookies/đăng nhập sống sót qua restart
+        # persistent context → cookies/đăng nhập + cf_clearance sống sót qua restart
         ctx = _BROWSER.chromium.launch_persistent_context(
             user_data_dir=profile,
             headless=True,
             no_viewport=True,
             viewport={"width": 1280, "height": 800},
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                  "--disable-blink-features=AutomationControlled"],
+            user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            locale="vi-VN", timezone_id="Asia/Ho_Chi_Minh",
+            args=_args,
         )
         _PAGE = ctx.pages[0] if ctx.pages else ctx.new_page()
     except Exception:
         # fallback: context thường
-        b = _BROWSER.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-gpu", "--disable-blink-features=AutomationControlled"],
-        )
-        _PAGE = b.new_page()
+        b = _BROWSER.chromium.launch(headless=True, args=_args)
+        _PAGE = b.new_page(
+            user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            locale="vi-VN", timezone_id="Asia/Ho_Chi_Minh")
     _PAGE.set_default_timeout(30000)
     _PAGE.set_default_navigation_timeout(45000)
     _PAGE.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-        "window.chrome={runtime:{}};")
+        "window.chrome={runtime:{}};"
+        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+        "Object.defineProperty(navigator,'languages',{get:()=>['vi-VN','vi','en-US','en']});")
     try:
         _PAGE.set_viewport_size({"width": 1280, "height": 800})
     except Exception:
@@ -105,10 +127,21 @@ def browser_open(url):
     try:
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(800)
+        # Cloudflare Turnstile/IUAM: chờ tối đa ~12s cho tự giải rồi đọc lại
+        if _is_cf_page(page):
+            for _ in range(6):
+                page.wait_for_timeout(2000)
+                if not _is_cf_page(page):
+                    break
         title = page.title() or ""
         text = (page.inner_text("body") or "")[:400]
         shot = _maybe_screenshot(page, "open")
-        return f"Đã mở: {page.url}\nTiêu đề: {title}\n\n{text}\n\nScreenshot: {shot}"
+        flag = " (Cloudflare đã tự giải xong)" if not _is_cf_page(page) and title else ""
+        if _is_cf_page(page):
+            return (f"Đã mở: {page.url}\nTiêu đề: {title}\nTRANG ĐANG BỊ CLOUDFLARE CHẶN "
+                    f"(Turnstile/IUAM chưa qua). Đợi 10-20s rồi gọi browser_content() lại, "
+                    f"hoặc giải tay 1 lần (cookie cf_clearance sẽ được lưu).\n\n{text}\n\nScreenshot: {shot}")
+        return f"Đã mở: {page.url}\nTiêu đề: {title}{flag}\n\n{text}\n\nScreenshot: {shot}"
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
 
