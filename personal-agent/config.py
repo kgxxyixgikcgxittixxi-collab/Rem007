@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.70"
+VERSION = "3.71"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -21,14 +21,14 @@ DEBUG = os.environ.get("REM_DEBUG", "0") == "1"
 MODEL_CHAT = "openai/gpt-oss-120b"
 MODEL_CLONE = "openai/gpt-oss-120b"
 MODEL_VISION = "meta-llama/llama-3.2-11b-vision-instruct"
-MODEL_FB = ["openai/gpt-oss-20b", "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct"]
+MODEL_FB = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
 MODEL_PREF_CHAT = [
     "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-    "qwen/qwen3-8b",
+    "qwen/qwen3.6-27b",
 ]
 MODEL_PREF_CLONE = [
     "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-    "qwen/qwen3-8b",
+    "qwen/qwen3.6-27b",
 ]
 MODEL_PREF_VISION = [
     "meta-llama/llama-3.2-11b-vision-instruct", "openai/gpt-oss-120b",
@@ -36,7 +36,7 @@ MODEL_PREF_VISION = [
 ]
 MODEL_PREF_FB = [
     "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b",
-    "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-8b",
+    "qwen/qwen3.6-27b",
     "groq/compound", "groq/compound-mini",
 ]
 

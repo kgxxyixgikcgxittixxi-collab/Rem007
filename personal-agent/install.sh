@@ -45,6 +45,8 @@ _pip() {
     "$PY" -m pip install --break-system-packages --quiet "$@" 2>/dev/null
 }
 _pip "requests>=2.28"
+_pip "curl_cffi>=0.7" || echo "[!] curl_cffi chưa cài được — web_fetch vẫn chạy bằng requests."
+_pip "reportlab>=4.0" || echo "[!] reportlab chưa cài được — xuất PDF sẽ không dùng được."
 
 # ── 2a. python-pptx (bài thuyết trình): lxml là gốc rễ trên ARM/Termux ────
 echo "[i] Cài python-pptx (tạo PowerPoint)..."
@@ -62,8 +64,8 @@ fi
 
 # ── 2b. LSP (tùy chọn nhưng khuyến khích): pylsp cho Python, clangd cho C/C++ ──
 echo "[i] Cài LSP: python-lsp-server (Python)..."
-if ! "$PY" -m pip install --quiet python-lsp-server 2>/dev/null; then
-    "$PY" -m pip install --user --quiet python-lsp-server 2>/dev/null || true
+if ! "$PY" -c "import pylsp" >/dev/null 2>&1; then
+    _pip "python-lsp-server" || echo "[!] python-lsp-server chưa cài được — lsp_* Python sẽ không dùng được."
 fi
 if command -v pkg >/dev/null 2>&1; then
     echo "[i] Cài clangd cho C/C++ (Termux)..."

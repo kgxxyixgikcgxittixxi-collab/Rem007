@@ -69,11 +69,16 @@ class KeyPool:
         ok_keys = groq._km.ok_keys(ks)
         if not ok_keys:
             return None, None
-        # Ưu tiên key có ít calls gần đây
+        # Ưu tiên key có ít calls gần đây (dùng stats thật của KeyManager)
         best = None
         best_score = float("inf")
+        _gs = getattr(groq._km, "_get_stats", None)
         for k in ok_keys:
-            score = groq._km.stats_get(k) if hasattr(groq._km, "stats_get") else 999
+            try:
+                _s = _gs(k) if _gs else {}
+            except Exception:
+                _s = {}
+            score = (_s.get("success", 0) + _s.get("fail", 0)) if isinstance(_s, dict) else 999
             if score < best_score:
                 best_score = score
                 best = k
