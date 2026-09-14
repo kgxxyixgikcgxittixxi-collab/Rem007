@@ -12,7 +12,7 @@ Thiết kế:
 - Watchdog: giám sát health, tự restart, auto-resume
 """
 
-import os, sys, time, threading, json, hashlib
+import os, sys, time, threading, json, hashlib, copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,31 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from providers import groq
 
-# ── Key Pools ────────────────────────────────────────────────────────────────
-
-KEY_POOLS = {
-    "main": {
-        "purpose": "Chat, coding, web search, general tasks",
-        "max_concurrent": 4,
-        "timeout": 90,
-        "model_pref": config.MODEL_PREF_CHAT,
-        "budget": 120,
-    },
-    "media": {
-        "purpose": "TTS, image generation, video processing",
-        "max_concurrent": 2,
-        "timeout": 180,
-        "model_pref": config.MODEL_PREF_VISION,
-        "budget": 300,
-    },
-    "desktop": {
-        "purpose": "Desktop control, browser automation, click/type",
-        "max_concurrent": 2,
-        "timeout": 60,
-        "model_pref": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
-        "budget": 60,
-    },
-}
+# ── Key Pools (nguồn duy nhất là config.KEY_POOLS — deepcopy 1 lần lúc import
+# để KeyPool giữ self.cfg tham chiếu không bao giờ làm bẩn config gốc) ──
+KEY_POOLS = copy.deepcopy(config.KEY_POOLS)
 
 # Track usage per pool for load balancing
 _pool_usage = {name: {"calls": 0, "last_call": 0.0, "errors": 0} for name in KEY_POOLS}

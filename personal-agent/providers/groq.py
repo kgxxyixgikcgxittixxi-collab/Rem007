@@ -143,6 +143,48 @@ def _dec(t):
     return None
 
 
+# ── Token usage accounting (kiểu opencode: footer ↑in ↓out mỗi lượt) ──
+# Groq (chuẩn OpenAI) trả "usage" trong response JSON và chunk cuối của stream
+# (khi có stream_options.include_usage). Trước đây agent vứt hết → không có
+# số liệu token thật. _note_usage() gom vào _UTURN (reset mỗi lượt) + _UTOT.
+_UTURN = {"prompt": 0, "completion": 0, "calls": 0}
+_UTOT = {"prompt": 0, "completion": 0, "calls": 0}
+_ULOCK = threading.Lock()
+
+
+def _note_usage(u):
+    try:
+        if not isinstance(u, dict):
+            return
+        p = int(u.get("prompt_tokens") or 0)
+        c = int(u.get("completion_tokens") or 0)
+        if p < 0 or c < 0:
+            return
+        if p == 0 and c == 0:
+            return  # báo usage rỗng (vd chunk giữa stream) → không tính 1 call ảo
+        with _ULOCK:
+            for d in (_UTURN, _UTOT):
+                d["prompt"] += p
+                d["completion"] += c
+                d["calls"] += 1
+    except Exception:
+        pass
+
+
+def take_usage():
+    """Lấy + reset số token của lượt vừa xong (TUI gọi sau mỗi task)."""
+    with _ULOCK:
+        d = dict(_UTURN)
+        _UTURN.update(prompt=0, completion=0, calls=0)
+    return d
+
+
+def session_usage():
+    """Tổng token thật từ đầu phiên (cho /stats + status bar)."""
+    with _ULOCK:
+        return dict(_UTOT)
+
+
 _KCACHE = {"t": 0.0, "v": []}
 
 
@@ -925,7 +967,9 @@ def chat(msgs, tools=None, budget=None, cancel=None):
             if r == "RATE":
                 continue
             if r is not None:
-                _msg = r.json()["choices"][0]["message"]
+                _data = r.json()
+                _note_usage(_data.get("usage"))
+                _msg = _data["choices"][0]["message"]
                 # gpt-oss trả thêm trường "reasoning" nhưng agent chỉ dùng
                 # content/tool_calls (/think đọc từ stream) → bỏ để gọn context
                 if isinstance(_msg, dict):
@@ -998,6 +1042,8 @@ def _iter_stream(r, on_delta, cancel=None):
                 d = json.loads(data)
             except Exception:
                 continue
+            if d.get("usage"):
+                _note_usage(d["usage"])
             ch = (d.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
             if delta.get("reasoning_content"):
@@ -1058,7 +1104,8 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
     Có thể ép model qua env REM_MODEL=openai/gpt-oss-20b.
     cancel: ESC//stop hủy trong ≤0.5s. Model chậm (timeout 2 lần) bị bỏ qua 5 phút,
     xoay sang model nhanh ngay thay vì treo 70s×5 như bản cũ."""
-    body = {"messages": msgs, "max_tokens": 8192, "stream": True}
+    body = {"messages": msgs, "max_tokens": 8192, "stream": True,
+            "stream_options": {"include_usage": True}}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -1148,7 +1195,9 @@ def text(p, max_tokens=700, temp=0.2, budget=None, cancel=None):
         if _is_cancelled(cancel):
             return ""
         if r is not None and r != "RATE" and r.status_code == 200:
-            content = r.json()["choices"][0]["message"].get("content")
+            _data = r.json()
+            _note_usage(_data.get("usage"))
+            content = _data["choices"][0]["message"].get("content")
             if content:
                 return content
             # content rỗng → thử model kế tiếp
@@ -1176,7 +1225,9 @@ def vision(q, img, budget=None, cancel=None):
         if r == "RATE":
             return None
         if r is not None and r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
+            _data = r.json()
+            _note_usage(_data.get("usage"))
+            return _data["choices"][0]["message"]["content"]
     return None
 
 
