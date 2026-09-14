@@ -766,6 +766,33 @@ def _note_fast(model):
         pass
 
 
+# ── Tham số theo tài liệu Groq cho reasoning models ──────────────────────
+# https://console.groq.com/docs/reasoning : temperature 0.5-0.7 + top_p 0.95
+# để reasoning ổn định (mặc định dễ lặp/vỡ); reasoning_effort low/medium/high
+# cho gpt-oss và qwen3.8 (qwen3.6 chỉ none/default nên không gắn effort).
+_REASON_TEMP = 0.6
+_REASON_TOP_P = 0.95
+
+
+def _is_reason_model(model):
+    m = model or ""
+    return m.startswith("openai/gpt-oss") or m.startswith("qwen/qwen3")
+
+
+def _apply_reason_params(model, body):
+    """Gắn tham số docs Groq cho reasoning models. Chỉ gắn khi body chưa tự set."""
+    body = dict(body)
+    if not _is_reason_model(model):
+        return body
+    body.setdefault("temperature", _REASON_TEMP)
+    body.setdefault("top_p", _REASON_TOP_P)
+    effort = os.environ.get("REM_REASONING", "low").strip().lower()
+    if effort in ("low", "medium", "high") and (
+            model.startswith("openai/gpt-oss") or model.startswith("qwen/qwen3.8")):
+        body["reasoning_effort"] = effort
+    return body
+
+
 def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
     """Gọi Groq với KeyManager: weighted key selection, circuit breaker, smart retry.
     cancel: threading.Event của ESC//stop → hủy trong ≤0.5s (không treo hết timeout).
@@ -775,10 +802,7 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
         return None
     if _slow_cooldown(model):
         return None
-    body = dict(body)
-    effort = os.environ.get("REM_REASONING", "low").strip().lower()
-    if model.startswith("openai/gpt-oss") and effort in ("low", "medium", "high"):
-        body["reasoning_effort"] = effort
+    body = _apply_reason_params(model, body)
     ks = keys()
     if not ks:
         return None
@@ -901,7 +925,12 @@ def chat(msgs, tools=None, budget=None, cancel=None):
             if r == "RATE":
                 continue
             if r is not None:
-                return r.json()["choices"][0]["message"]
+                _msg = r.json()["choices"][0]["message"]
+                # gpt-oss trả thêm trường "reasoning" nhưng agent chỉ dùng
+                # content/tool_calls (/think đọc từ stream) → bỏ để gọn context
+                if isinstance(_msg, dict):
+                    _msg.pop("reasoning", None)
+                return _msg
             all_rate = False
         if all_rate:
             wait = min(1 + attempt, 4)

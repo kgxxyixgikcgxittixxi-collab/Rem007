@@ -181,7 +181,7 @@ MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
 
 # Registry lệnh / để gợi ý khi gõ sai/gõ dở (kiểu autocomplete opencode)
 _SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
-          "/stop", "/rest", "/models", "/debug", "/think", "/del", "/auto",
+          "/stop", "/rest", "/models", "/debug", "/think", "/effort", "/del", "/auto",
           "/safe", "/status", "/stats", "/sessions", "/new", "/plan", "/build", "/agent",
           "/lsp", "/mcp", "/init", "/keys", "/key", "/checkupdate", "/update",
           "/overlay", "/exit", "/quit", "/export"]
@@ -1108,6 +1108,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
                     "/debug   bật/tắt chế độ gỡ lỗi",
                     "/think   xem đầy đủ suy luận của lần trả lời cuối",
+                    "/effort [low|medium|high]  đổi mức suy luận (gpt-oss, qwen3.8)",
                     "/clear   xoá màn hình (hiện logo REM)",
                     "/overlay on|off|status  cửa sổ nổi hiện việc đang làm",
                     "/checkupdate  kiểm tra bản mới trên GitHub",
@@ -1214,6 +1215,15 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 _type(render.thinking_to_ansi(self._last_think, full=True), None)
             else:
                 _p("(chưa có suy luận nào để xem — câu trả lời không dùng thẻ thinking)", "dim")
+        elif cmd == "/effort":
+            # Đổi mức suy luận reasoning_effort theo docs Groq (low/medium/high),
+            # áp dụng cho gpt-oss và qwen3.8 từ câu hỏi kế tiếp, không tốn gì thêm.
+            lv = (parts[1].strip().lower() if len(parts) > 1 else "")
+            if lv in ("low", "medium", "high"):
+                os.environ["REM_REASONING"] = lv
+                _p(f"Mức suy luận: {lv} (gpt-oss, qwen3.8).", "gr")
+            else:
+                _p(f"Mức hiện tại: {os.environ.get('REM_REASONING', 'low')} — dùng: /effort low|medium|high", "dim")
         elif cmd == "/del":
             if len(parts) < 2:
                 _p("Cú pháp: /del <session-id>  (xem /sessions)", "dim")
