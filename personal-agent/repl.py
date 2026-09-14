@@ -500,12 +500,11 @@ class Repl:
                 if not ch:
                     continue
                 if ch in ("\r", "\n"):
-                    with _OUT_LOCK:
-                        try:
-                            sys.stdout.write("\n")
-                            sys.stdout.flush()
-                        except Exception:
-                            pass
+                    try:  # lock-free: Enter không đợi _OUT_LOCK (tránh kẹt khi worker đang in)
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                    except Exception:
+                        pass
                     return "".join(buf).strip()
                 if ch == "\x03":  # Ctrl+C
                     with _OUT_LOCK:
@@ -1615,15 +1614,20 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                    "ye")
                 continue
             # Opencode-style: highlight user input, show as "User" block.
-            # Xóa dòng input vừa gõ theo đúng số hàng vật lý (prompt 2 dòng + chữ dài
-            # có thể wrap) — bản cũ chỉ lùi 1 hàng nên sót chữ gây dính logo/prompt.
+            # Xóa đúng số hàng vật lý của prompt 2 dòng + input wrap — bản cũ gộp
+            # chung disp_len(prompt+input) bỏ qua xuống dòng nên thiếu 1 hàng, gây dính.
             try:
                 with _OUT_LOCK:
                     try:
                         _vis = re.sub(r"\x1b\[[0-9;]*m", "", self._prompt_hint())
-                        _total = render.disp_len(_vis) + render.disp_len(line)
                         _tw = render.term_width() or 90
-                        _rows = max(1, (_total + _tw - 1) // _tw)
+                        _parts = _vis.split("\n")
+                        # prompt có N dòng, dòng cuối nối liền input
+                        _rows = 0
+                        for _pl in _parts[:-1]:
+                            _rows += max(1, (render.disp_len(_pl) + _tw - 1) // _tw)
+                        _last = _parts[-1] if _parts else ""
+                        _rows += max(1, (render.disp_len(_last) + render.disp_len(line) + _tw - 1) // _tw)
                         sys.stdout.write("\r\033[2K")
                         for _ in range(_rows - 1):
                             sys.stdout.write("\033[1A\033[2K")
