@@ -178,6 +178,30 @@ def test_rec_stop_empty():
         check("rec_stop hồi quy", False, f"{type(e).__name__}: {e}")
 
 
+def test_no_real_keys_in_repo():
+    print("[8] không key Groq thật trong repo (chống lộ key khi push)")
+    import re, subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        out = subprocess.check_output(["git", "-C", root, "ls-files"], text=True, timeout=15)
+        files = [os.path.join(root, f) for f in out.split()]
+    except Exception as e:
+        check("git ls-files", False, str(e)[:80])
+        return
+    bad = []
+    for fp in files:
+        if os.path.isdir(fp):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8", errors="strict") as f:
+                txt = f.read(200000)
+        except Exception:
+            continue  # file nhị phân → bỏ qua
+        for m in re.findall(r"gsk_[A-Za-z0-9]{20,}", txt):
+            bad.append(f"{os.path.relpath(fp, root)}:{m[:12]}...")
+    check("repo sạch key thật", not bad, str(bad[:3]))
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -196,6 +220,7 @@ def main():
         test_repl_helpers()
         test_overlay_and_fastpath()
         test_rec_stop_empty()
+        test_no_real_keys_in_repo()
         print(f"--> lượt {rnd}: {PASS} pass, {FAIL} fail")
         total_fail += FAIL
     print(f"TỔNG: {total_fail} fail sau {args.loop} lượt")

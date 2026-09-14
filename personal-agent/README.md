@@ -64,7 +64,18 @@ python main.py
 /key gsk_...   # dán key (có thể dán nguyên cụm chứa nhiều key, tự tách)
 /keys          # xem có bao nhiêu key
 ```
-Key lưu trong `~/.rem_ai/rem.db`.
+Key lưu trong `~/.rem_ai/rem.db` (mã hoá, ngoài repo — không bao giờ push lên GitHub).
+
+### Key mặc định cho máy mới (không cần gõ lại từng key)
+Tạo file `~/.rem_ai/seed_keys.txt`, mỗi key một dòng (hoặc cách nhau bởi
+khoảng trắng/phẩy/xuống dòng). Lần đầu mở Remtm, key tự nạp vào DB rồi mã hoá:
+```bash
+cat > ~/.rem_ai/seed_keys.txt   # dán các key, xong Ctrl+D
+Remtm
+/keys   # kiểm tra
+```
+Hoặc dùng biến môi trường `REM_GQ_SEED` (cùng định dạng). Chỉ nạp khi DB chưa
+có key nào; file seed nằm ngoài repo nên an toàn khi push code.
 
 ## Lệnh REPL
 ```text

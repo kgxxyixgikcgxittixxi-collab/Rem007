@@ -196,13 +196,24 @@ def scan(t):
 
 
 def seed_defaults():
-    """Nạp key mặc định từ biến môi trường REM_GQ_SEED (phân cách xuống dòng/phẩy/dấu cách)
-    chỉ khi DB chưa có key nào. Key được mã hoá trước khi lưu, không nằm trong repo."""
+    """Nạp key mặc định khi DB chưa có key nào, từ (1) file ~/.rem_ai/seed_keys.txt
+    (mỗi key một dòng, hoặc cách nhau bởi khoảng trắng/phẩy/xuống dòng) và
+    (2) biến môi trường REM_GQ_SEED. Key được mã hoá trước khi lưu vào rem.db
+    và KHÔNG BAO GIỜ nằm trong repo git (file seed nằm ngoài repo)."""
     if keys():
         return 0
     txt = os.environ.get("REM_GQ_SEED", "") or ""
-    found = re.findall(r"gsk_[A-Za-z0-9]{40,}", txt)
-    return sum(1 for k in found if add_key(k))
+    try:
+        with open(os.path.join(DIR, "seed_keys.txt"), "r", encoding="utf-8") as f:
+            txt += "\n" + f.read()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    found = re.findall(r"gsk_[A-Za-z0-9]{20,}", txt)
+    seen = set()
+    uniq = [k for k in found if not (k in seen or seen.add(k))]
+    return sum(1 for k in uniq if add_key(k))
 
 
 _MODELS = {"items": None, "at": 0.0}
