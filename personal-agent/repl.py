@@ -807,7 +807,21 @@ class Repl:
         except Exception:
             pass
         _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
-        if not groq.keys():
+        # Dòng trạng thái kiểu opencode: model | keys | chế độ | session
+        # (chỉ đọc cache, không gọi mạng để khỏi lag mỗi lần vẽ màn hình)
+        try:
+            _live = (getattr(groq, "_MODELS", {}) or {}).get("items") or set()
+            _model = next((m for m in config.MODEL_PREF_CHAT if m in _live), None) or config.MODEL_CHAT
+        except Exception:
+            _model = "?"
+        try:
+            _nkeys = len(groq.keys())
+        except Exception:
+            _nkeys = 0
+        _auto = self.agent_auto()
+        _mode = "auto" if _auto is True else ("safe" if _auto is False else "?")
+        _p(f"◆ {_model} | {_nkeys} keys | {_mode} | {self.sid}", "cy")
+        if not _nkeys:
             _p("⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
 
     def agent_auto(self):
