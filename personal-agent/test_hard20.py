@@ -429,7 +429,7 @@ def t21_task_dispatch_e2e():
     import providers.groq as _g
     calls = {"n": 0}
 
-    def fake_chat_stream(msgs, tools=None, budget=None, on_delta=None):
+    def fake_chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return {"content": None, "tool_calls": [

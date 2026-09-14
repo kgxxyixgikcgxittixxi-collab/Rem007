@@ -164,15 +164,17 @@ def _sys(manager, sid, cwd, user_text=""):
         "Kế thừa đúng dữ liệu đã thu thập (kết quả web, file đã tạo, đường dẫn) — KHÔNG làm lại, "
         "KHÔNG tự bịa thêm thông tin không có trong lịch sử."
     )
+    # ⚡ PROMPT CACHING: Groq cache tự động theo prefix KHỚP CHÍNH XÁC (giảm 50%
+    # chi phí + token cache KHÔNG tính vào rate limit 8K TPM). Phải giữ phần
+    # TĨNH (giới thiệu, tool list, luật) ổn định ở đầu prompt, mọi phần ĐỘNG
+    # (thời gian, thư mục, session, route) phải dồn về CUỐI — nếu không mỗi phút
+    # đổi %H:%M là phá cache, tốn gấp đôi input mỗi lần gọi.
     return {
         "role": "system",
         "content": (
             f"Bạn là {config.NAME} ({config.VERSION}) — agent Python chạy 100% trên Groq, "
             "theo kiến trúc MCP của goose/opencode: mọi thao tác qua công cụ MCP "
             "(mỗi công cụ chạy trong tiến trình riêng biệt).\n\n"
-            f"Hôm nay: {time.strftime('%Y-%m-%d %H:%M')}\n"
-            f"Thư mục làm việc: {cwd}\nSession: {sid}\n\n"
-            f"{session_line} "
             "KINH NGHIỆM/SKILL/HƯỚNG DẪN DỰ ÁN bên dưới là kiến thức chung, KHÔNG phải lịch sử trò chuyện. "
             "Chỉ trả lời đúng câu hỏi hiện tại; chưa đủ thông tin thì dùng tool kiểm tra, không suy đoán.\n\n"
             "CÁC CÔNG CỤ CÓ SẵN:\n"
@@ -281,6 +283,10 @@ def _sys(manager, sid, cwd, user_text=""):
             f"{skills_section}"
             f"{exp_section}"
             f"{_route_section(user_text)}"
+            # PHẦN ĐỘNG — để CUỐI cùng để không phá prefix cache của Groq
+            f"\n\nTHỜI ĐIỂM/GHẾ LÀM VIỆC: hôm nay {time.strftime('%Y-%m-%d %H:%M')}, "
+            f"thư mục {cwd}, session {sid}.\n"
+            f"{session_line}"
         ),
     }
 

@@ -43,6 +43,11 @@ class LSPClient:
             self._initialize()
         except Exception as e:
             self._err = repr(e)
+            # init fail → đóng proc ngay, không cache client hỏng (tránh mọi call sau timeout 20s oan)
+            try:
+                self.close()
+            except Exception:
+                pass
         self._ready.set()
 
     def _reader(self):
@@ -325,11 +330,19 @@ class LSPClient:
 
     def close(self):
         try:
-            self.shutdown = self.rpc("shutdown", {}, timeout=5)
+            self.rpc("shutdown", {}, timeout=5)
         except Exception:
             pass
         try:
             self.notify("exit")
+        except Exception:
+            pass
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.stdout.close()
         except Exception:
             pass
         try:
@@ -339,6 +352,17 @@ class LSPClient:
                 self.proc.terminate()
             except Exception:
                 pass
+            try:
+                self.proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+                try:
+                    self.proc.wait(timeout=1)
+                except Exception:
+                    pass
 
 
 def _lang_id(lang):
@@ -382,12 +406,19 @@ def _client_for(path, cwd):
     with _lock:
         hit = _clients.get(key)
         if hit is not None:
-            hit[1] = time.time()
-            return hit[0], None
+            if hit[0]._err:
+                # client hỏng do init fail → xóa cache, không trả client chết
+                _clients.pop(key, None)
+            else:
+                hit[1] = time.time()
+                return hit[0], None
         try:
             cl = LSPClient(lang, cwd=cwd)
         except Exception as e:
             return None, f"[LOI] không khởi động được LSP '{lang}': {type(e).__name__}: {e}"
+        if cl._err:
+            # init fail đã close() trong __init__ → không cache
+            return None, f"[LOI] không khởi động được LSP '{lang}': {cl._err}"
         victim = _client_touch(key, cl)
     _close_quiet(victim)
     return cl, None
@@ -515,12 +546,14 @@ def _which(cmd):
 
 def close_all():
     with _lock:
-        for cl in list(_clients.values()):
-            try:
-                cl.close()
-            except Exception:
-                pass
+        items = list(_clients.values())
         _clients.clear()
+    for entry in items:
+        cl = entry[0] if isinstance(entry, (list, tuple)) else entry
+        try:
+            cl.close()
+        except Exception:
+            pass
 
 
 TOOLS = [

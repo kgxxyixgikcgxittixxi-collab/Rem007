@@ -9,7 +9,63 @@ from agentloop import Agent
 from permissions import Presets
 from providers import groq
 
-_OUT_LOCK = threading.Lock()
+_OUT_LOCK = threading.RLock()
+# Repl đang nhận phím (để _p/_type/spinner không \r\K xóa dòng đang gõ gây mất chữ).
+_ACTIVE_REPL = None
+# True khi worker đang in đáp án nguyên khối → _p/_type bên trong chỉ ghi, không xóa/vẽ lại input.
+_HOLD_REDRAW = False
+
+
+def _input_state():
+    """Trả về Repl đang ở trong input() — None nếu không ai đang gõ."""
+    try:
+        r = _ACTIVE_REPL
+        if r is not None and getattr(r, "_in_input", False):
+            return r
+    except Exception:
+        pass
+    return None
+
+
+def _prompt_rows(prompt_plain, buf_text, tw):
+    """Số hàng vật lý của (prompt nhiều dòng + buffer đang gõ)."""
+    try:
+        tw = int(tw or 90) or 90
+        parts = (prompt_plain or "").split("\n")
+        rows = 0
+        for pl in (parts[:-1] if parts else []):
+            rows += max(1, (render.disp_len(pl) + tw - 1) // tw)
+        last = (parts[-1] if parts else "") + (buf_text or "")
+        rows += max(1, (render.disp_len(last) + tw - 1) // tw)
+        return max(1, rows)
+    except Exception:
+        return 1
+
+
+def _erase_input_locked(r):
+    """Xóa sạch dòng input đang gõ (đúng số hàng wrap) — gọi khi đã giữ _OUT_LOCK."""
+    try:
+        tw = render.term_width() or 90
+        pp = re.sub(r"\x1b\[[0-9;]*m", "", str(getattr(r, "_input_prompt", "") or ""))
+        bb = "".join(getattr(r, "_input_buf", []) or [])
+        rows = _prompt_rows(pp, bb, tw)
+        sys.stdout.write("\r\033[2K")
+        for _ in range(rows - 1):
+            sys.stdout.write("\033[1A\033[2K")
+        sys.stdout.write("\r")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _redraw_input_locked(r):
+    """Vẽ lại prompt + ký tự đã gõ sau khi in output chen ngang — gọi khi giữ _OUT_LOCK."""
+    try:
+        sys.stdout.write(str(getattr(r, "_input_prompt", "") or "")
+                         + "".join(getattr(r, "_input_buf", []) or []))
+        sys.stdout.flush()
+    except Exception:
+        pass
 try:
     import readline
     _HAS_READLINE = True
@@ -189,9 +245,18 @@ _SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
 
 def _p(s, col="cy", end="\n"):
     with _OUT_LOCK:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.write(C.get(col, "") + str(s) + C["reset"] + end)
-        sys.stdout.flush()
+        r = _input_state()
+        if r is not None and not _HOLD_REDRAW:
+            # Đang gõ → xóa đúng số hàng input, in output, vẽ lại buffer (không mất chữ).
+            _erase_input_locked(r)
+            sys.stdout.write(C.get(col, "") + str(s) + C["reset"] + end)
+            sys.stdout.flush()
+            _redraw_input_locked(r)
+        else:
+            if r is None:
+                sys.stdout.write("\r\033[K")
+            sys.stdout.write(C.get(col, "") + str(s) + C["reset"] + end)
+            sys.stdout.flush()
     _redisplay_input()
 
 
@@ -200,31 +265,26 @@ def _strip_ansi(s):
 
 
 def _type(s, col=None):
-    """In theo nhóm chữ NHANH và RÕ: mã màu (ANSI) xuất tức thì không bao giờ bị tách,
-    chữ Vietnamese giữ nguyên nhiều byte. Có sẵn màu từ render → col=None."""
+    """In đáp án NHANH (không typewriter): gõ chữ nào hiện chữ đó theo màu sẵn có.
+    Trước đây sleep từng token (T=0.015s/từ) GIỮ KHÓA _OUT_LOCK — vừa chậm vừa làm
+    chữ user gõ bị nhịn (phải chờ Enter mới hiện). Giờ in tức thì, bỏ hẹn giờ."""
     if not sys.stdin.isatty() or config.DEBUG:
         _p(_strip_ansi(s), col if col is not None else "")
         return
     text = s if col is None else (C.get(col, "") + s + C["reset"])
-    fast = render.disp_len(text) > 1000
-    sa = 0.0 if fast else T * 1.0    # pause sau khoảng trắng
-    sw = 0.0 if fast else T * 0.45   # pause sau từ
     with _OUT_LOCK:
+        global _HOLD_REDRAW
+        r = _input_state()
+        hold = _HOLD_REDRAW
+        if r is not None and not hold:
+            # Đang gõ → đẩy input lên trên, in đáp án ở dòng mới, xong vẽ lại input.
+            _erase_input_locked(r)
+        elif not hold:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
         sys.stdout.write("\033[?25l")
         try:
-            for tok in render._tokens(text):
-                if tok[0] == "esc":
-                    sys.stdout.write(tok[1])
-                elif tok[0] == "s":
-                    sys.stdout.write(tok[1])
-                    if sa:
-                        sys.stdout.flush()
-                        time.sleep(sa)
-                else:
-                    sys.stdout.write((tok[1] or "") + tok[2])
-                    if sw:
-                        sys.stdout.flush()
-                        time.sleep(sw)
+            sys.stdout.write(text)
         except Exception:
             sys.stdout.write(_strip_ansi(text))
         finally:
@@ -232,6 +292,8 @@ def _type(s, col=None):
             sys.stdout.flush()
         sys.stdout.write("\n")
         sys.stdout.flush()
+        if r is not None and not hold:
+            _redraw_input_locked(r)
     _redisplay_input()
 
 
@@ -244,12 +306,22 @@ def _klines(logo, colors):
 
 
 def _logo_banner():
-    logo = _klines(config.LOGO, ["rd", "ye", "gr", "cy", "mg", "bl"])
-    return logo
+    # opencode-style: banner gọn — chỉ hiện logo lớn khi terminal đủ rộng,
+    # còn lại trả về dòng tiêu đề tối giản (tránh nối mòn giao diện cũ chiếm nửa màn hình)
+    try:
+        import shutil as _sh
+        tw = _sh.get_terminal_size().columns
+    except Exception:
+        tw = 80
+    if tw >= 78:
+        logo = _klines(config.LOGO, ["rd", "ye", "gr", "cy", "mg", "bl"])
+        return logo
+    # màn hình hẹp → chỉ 1 dòng opencode-style title
+    return C["dim"] + "─ " + C["bold"] + C["cy"] + f"◆ REM v{config.VERSION}" + C["reset"] + C["dim"] + " · opencode edition" + C["reset"]
 
 
 def _tool_title(ev):
-    """Tiêu đề tool kiểu opencode: 'Bash  —  $ ls -la'."""
+    """Tiêu đề tool kiểu opencode: '⏺ Bash · $ ls -la' (giữ ngắn, dim phần args)."""
     name = ev.get("name", "?") if isinstance(ev, dict) else "?"
     note = ""
     args = ev.get("args") or {}
@@ -262,13 +334,14 @@ def _tool_title(ev):
             for k in ("command", "path", "query", "url", "pattern", "filename", "name", "file", "dir"):
                 v = args.get(k)
                 if v not in (None, ""):
-                    note = str(v)
+                    note = str(v).strip().split("\n")[0]
                     break
     label = _TOOL_LABEL.get(name, name)
     if name == "bash" and note:
         note = "$ " + note
-    note = (note or "")[:72]
-    return f"{label}  —  {note}" if note else label
+    # opencode cắt args còn ~64 ký tự, dim phần sau
+    note = (note or "")[:64]
+    return f"{label}  ·  {note}" if note else label
 
 
 def _diff_preview(name, args):
@@ -325,7 +398,11 @@ class Repl:
         self.rec_mode = ""        # tên macro đang ghi (chế độ ghi từ /rec), "" = chat thường
         self._list_items = []     # [(kind,id,desc)] của lần /list gần nhất (chọn số để mở)
         self._in_input = False    # True khi main thread đang ở input() → spinner không animate đè
+        self._input_buf = []        # buffer ký tự đang gõ (để _p vẽ lại khi chen ngang)
+        self._input_prompt = ""     # prompt hiện tại (để _p vẽ lại khi chen ngang)
         self._last_esc = 0.0      # mốc ESC gần nhất (ESC đúp ≤0.8s = dừng cứng kiểu opencode)
+        global _ACTIVE_REPL
+        _ACTIVE_REPL = self
         self._mk_agent()
 
     def _mk_agent(self, sid=None):
@@ -387,11 +464,14 @@ class Repl:
             except Exception:
                 return ""
         try:
-            sys.stdout.write(prompt)
-            sys.stdout.flush()
+            with _OUT_LOCK:
+                sys.stdout.write(prompt)
+                sys.stdout.flush()
         except Exception:
             pass
         buf = []
+        self._input_buf = buf
+        self._input_prompt = prompt
         try:
             fd = sys.stdin.fileno()
             old = _tm.tcgetattr(fd)
@@ -403,6 +483,10 @@ class Repl:
         try:
             _ty.setcbreak(fd)
             while True:
+                # CHỐNG KẸT CHỮ (gõ bị dính tới khi Enter): echo KHÔNG khóa _OUT_LOCK.
+                # Worker (spinner/_p/_type) giữ khóa luân phiên → nếu echo đợi lock,
+                # phím gõ bị nhịn không hiện tới khi Enter nhả lock. Echo lock-free
+                # giúp chữ hiện NGAY; khi worker vẽ/redraw đè thì nó tự vẽ lại buf.
                 try:
                     rl, _, _ = _sel.select([sys.stdin], [], [], 0.1)
                 except Exception:
@@ -416,23 +500,35 @@ class Repl:
                 if not ch:
                     continue
                 if ch in ("\r", "\n"):
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    with _OUT_LOCK:
+                        try:
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                        except Exception:
+                            pass
                     return "".join(buf).strip()
                 if ch == "\x03":  # Ctrl+C
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    with _OUT_LOCK:
+                        try:
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                        except Exception:
+                            pass
                     raise KeyboardInterrupt
                 if ch == "\x04":  # Ctrl+D
                     if not buf:
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
+                        with _OUT_LOCK:
+                            try:
+                                sys.stdout.write("\n")
+                                sys.stdout.flush()
+                            except Exception:
+                                pass
                         raise EOFError
                     continue
                 if ch in ("\x7f", "\x08"):  # Backspace
                     if buf:
                         buf.pop()
-                        try:
+                        try:  # echo lock-free (xem ghi chú chống kẹt chữ ở đầu vòng lặp)
                             sys.stdout.write("\b \b")
                             sys.stdout.flush()
                         except Exception:
@@ -456,22 +552,24 @@ class Repl:
                     self._last_esc = now
                     if self._busy:
                         self._request_stop(hard=double)
-                        buf = []
+                        buf.clear()
                         try:
-                            sys.stdout.write("\n")
-                            sys.stdout.flush()
-                            sys.stdout.write(prompt)
-                            sys.stdout.flush()
+                            with _OUT_LOCK:
+                                sys.stdout.write("\n")
+                                sys.stdout.flush()
+                                sys.stdout.write(prompt)
+                                sys.stdout.flush()
                         except Exception:
                             pass
                         continue
                     # rảnh: ESC = xóa dòng (opencode) rồi gõ tiếp
                     if buf:
-                        buf = []
+                        buf.clear()
                         try:
-                            sys.stdout.write("\r\033[K")
-                            sys.stdout.write(prompt)
-                            sys.stdout.flush()
+                            with _OUT_LOCK:
+                                sys.stdout.write("\r\033[K")
+                                sys.stdout.write(prompt)
+                                sys.stdout.flush()
                         except Exception:
                             pass
                     continue
@@ -480,9 +578,9 @@ class Repl:
                 except Exception:
                     o = 32
                 if o < 32:
-                    continue  # bỏ control char khác
+                    continue  # bỏ control char khác (giữ \t? Tab gõ tay = focus, không chèn)
                 buf.append(ch)
-                try:
+                try:  # echo lock-free (xem ghi chú chống kẹt chữ ở đầu vòng lặp)
                     sys.stdout.write(ch)
                     sys.stdout.flush()
                 except Exception:
@@ -519,7 +617,7 @@ class Repl:
             ok = not r.startswith(("[LOI]", "[TOOL LOI]", "[TU CHOI]"))
             dt = time.time() - (self._tool_t0 or time.time())
             label = _TOOL_LABEL.get(self._cur_title.split("  —  ")[0] if "  —  " in self._cur_title else self._cur_title, self._cur_title)
-            row = ("  ✓ " if ok else "  ✗ ") + C["gr" if ok else "rd"] + label + C["reset"] + C["dim"] + f" done · {dt:.1f}s" + C["reset"]
+            row = ("  ✓ " if ok else "  ✗ ") + C["gr" if ok else "rd"] + label + C["reset"] + C["dim"] + f" · {dt:.1f}s" + C["reset"]
             self._tool_rows.append((row, not ok))
             if len(self._tool_rows) > 14:
                 self._tool_rows.pop(0)
@@ -602,11 +700,17 @@ class Repl:
             time.sleep(0.4)
             i += 1
         with _OUT_LOCK:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
+            r = _input_state()
+            if r is not None:
+                pass  # đang gõ → _p đã vẽ lại input, không xóa đè
+            else:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
 
     def _clear_spin_line(self):
         with _OUT_LOCK:
+            if _input_state() is not None:
+                return  # đang gõ → không \r\K xóa dòng input (gây mất chữ)
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
 
@@ -763,21 +867,33 @@ class Repl:
                 self._clear_spin_line()   # rồi mới in tránh bị đè "Rem>"
                 # timeline tool ĐÃ in live khi từng tool xong ở _on_ev — không in lại nữa
                 if out:
+                    global _HOLD_REDRAW
                     with _OUT_LOCK:
+                        r_out = _input_state()
+                        if r_out is not None:
+                            _erase_input_locked(r_out)
+                        _HOLD_REDRAW = True
                         sys.stdout.write(P_AGENT)
                         sys.stdout.flush()
-                    think, body = render.split_thinking(out)
-                    self._last_think = think
-                    # Opencode-style thinking block
-                    if think.strip():
-                        _type(render.thinking_to_ansi(think, full=False), None)
-                    # Body — render markdown sạch (opencode-style)
-                    if body.strip():
-                        _type(render.md_to_ansi(body), None)
-                    # Đáp án xong → gợi ý phím tắt kiểu opencode.
-                    # KHÔNG in "❯ " tay ở đây — vòng input() kế tiếp sẽ in prompt
-                    # (in tay gây double prompt "❯ ❯" và dính chữ như log lỗi).
-                    self._footer_hints()
+                    try:
+                        think, body = render.split_thinking(out)
+                        self._last_think = think
+                        # Opencode-style thinking block
+                        if think.strip():
+                            _type(render.thinking_to_ansi(think, full=False), None)
+                        # Body — render markdown sạch (opencode-style)
+                        if body.strip():
+                            _type(render.md_to_ansi(body), None)
+                        # Đáp án xong → gợi ý phím tắt kiểu opencode.
+                        # KHÔNG in "❯ " tay ở đây — vòng input() kế tiếp sẽ in prompt
+                        # (in tay gây double prompt "❯ ❯" và dính chữ như log lỗi).
+                        self._footer_hints()
+                    finally:
+                        with _OUT_LOCK:
+                            _HOLD_REDRAW = False
+                            if r_out is not None:
+                                _redraw_input_locked(r_out)
+                            sys.stdout.flush()
                 try:
                     _overlay_write(mode="XONG", tool="", progress="xong — lần sau phát lại nhanh")
                 except Exception:
@@ -1280,7 +1396,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 pass
             _p("Đã xoá stats key đã học.", "gr")
         elif cmd == "/checkupdate":
-            rv = updater.remote_version()
+            rv = updater.remote_version(force=True)   # check tay → bỏ cache, lấy version thật
             if not rv:
                 _p("Không lấy được bản mới từ GitHub (kiểm tra mạng).", "rd")
             elif updater._ver_tuple(rv) > updater._ver_tuple(config.VERSION):
@@ -1323,9 +1439,9 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         return True
 
     def _header_box(self):
-        """Hộp thông tin đầu phiên kiểu opencode: viền bo tròn + session/model/cwd/keys."""
+        """Hộp thông tin đầu phiên kiểu opencode: viền mảnh + title pill + 3 dòng metadata."""
         tw = render.term_width()
-        w = min(max(tw - 6, 44), 78)
+        w = min(max(tw - 6, 48), 78)
         try:
             ms = groq.chat_models()
             model = ms[0] if ms else "chưa có key"
@@ -1335,53 +1451,77 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             nkeys = len(groq.keys())
         except Exception:
             nkeys = 0
-        title = f" REM v{config.VERSION} "
+        # opencode đặt title ở viền trên: "─ REM vX · opencode ─"
+        title = f" ◆ REM v{config.VERSION} · opencode "
+        top = C["dim"] + "╭" + title + "─" * max(0, w - render.disp_len(title) - 2) + "╮" + C["reset"]
+        # cwd rút gọn nếu dài quá w
+        cwd = os.getcwd()
+        if render.disp_len(cwd) > w - 10:
+            cwd = "…" + cwd[-(w - 11):]
+        # key pill màu theo số lượng (opencode: dot xanh/vàng/đỏ)
+        if nkeys >= 10:
+            kpill = C["gr"] + f"{nkeys} keys" + C["reset"]
+            kplain = f"{nkeys} keys"
+        elif nkeys >= 3:
+            kpill = C["ye"] + f"{nkeys} keys" + C["reset"]
+            kplain = f"{nkeys} keys"
+        else:
+            kpill = C["rd"] + f"{nkeys} keys" + C["reset"]
+            kplain = f"{nkeys} keys"
         rows = [
-            f"model  {model}",
-            f"dir    {os.getcwd()}",
-            f"chat   {self.sid} · {nkeys} keys",
+            (f"model  {C['cy']}{model}{C['reset']}", f"model  {model}"),
+            (f"dir    {C['wh']}{cwd}{C['reset']}", f"dir    {cwd}"),
+            (f"chat   {C['dim']}{self.sid}{C['reset']} · {kpill}", f"chat   {self.sid} · {kplain}"),
         ]
-        print(C["dim"] + "╭" + title + "─" * max(0, w - render.disp_len(title) - 2) + "╮" + C["reset"])
-        for r in rows:
-            pad = max(0, w - 4 - render.disp_len(r))
-            print(C["dim"] + "│" + C["reset"] + " " + r + " " * pad + " " + C["dim"] + "│" + C["reset"])
+        print(top)
+        for rendered, plain in rows:
+            pad = max(0, w - 4 - render.disp_len(plain))
+            print(C["dim"] + "│" + C["reset"] + " " + rendered + " " * pad + " " + C["dim"] + "│" + C["reset"])
         bot = "╰" + "─" * (w - 2) + "╯"
         print(C["dim"] + bot + C["reset"])
 
     def _footer_hints(self):
-        # Status bar kiểu opencode: gợi ý trái, thư mục + version phải
+        # Status bar đáy kiểu opencode: gợi ý phím tắt trái — model/dir phải (dim toàn dòng)
         try:
             tw = render.term_width()
         except Exception:
             tw = 90
-        left = "/list · /new · /stop · /exit"
+        left = "↵ send · / for commands · esc interrupt"
         try:
-            right = f"{os.path.basename(os.getcwd())} · v{config.VERSION}"
+            ms = groq.chat_models()
+            mshort = (ms[0].split("/")[-1] if ms else "?")[:18]
         except Exception:
-            right = ""
+            mshort = "?"
+        try:
+            right = f"{mshort} · {os.path.basename(os.getcwd())} · v{config.VERSION}"
+        except Exception:
+            right = f"v{config.VERSION}"
         try:
             pad = max(2, tw - render.disp_len(left) - render.disp_len(right))
         except Exception:
             pad = 4
-        print(C["dim"] + left + " " * pad + right + C["reset"], flush=True)
+        with _OUT_LOCK:
+            sys.stdout.write(C["dim"] + left + " " * pad + right + C["reset"] + "\n")
+            sys.stdout.flush()
 
     def _prompt_hint(self):
         # Opencode-style: thẻ nhập LUÔN 2 dòng (dòng gợi ý mờ + dòng ❯ nhập liệu).
         # Giữ cùng chiều cao khi bận/rảnh để không sót dòng prompt cũ gây dính chữ.
+        # KHÔNG in "❯ " tay — để _input_line echo tự hiện (chống dính chữ khi paste).
         try:
             lv = self._agent.live_count()
         except Exception:
             lv = 0
-        rec = (C["rd"] + "⏺REC " + C["reset"]) if self.rec_mode else ""
+        rec = (C["rd"] + "⏺ REC " + C["reset"]) if self.rec_mode else ""
         live = (C["ye"] + f"📥{lv} " + C["reset"]) if lv else ""
-        card_top = (C["dim"] + "╭─❯ gõ câu hỏi · /list danh mục · /rec ghi thao tác"
+        card_top = (C["dim"] + "╭─ type a message · / for commands · /rec macro"
                     + C["reset"] + "\n")
         if self._busy:
-            top = (C["dim"] + "╭─❯ đang chạy — gõ để điều chỉnh · ESC//stop để dừng"
+            top = (C["dim"] + "╭─ running — type to steer · esc to interrupt"
                    + C["reset"] + "\n")
             return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
         if self._pending:
-            top = (C["dim"] + f"╭─❯ xếp hàng ({self._pending}) — chờ lượt chạy"
+            top = (C["dim"] + f"╭─ queued ({self._pending}) — waiting"
                    + C["reset"] + "\n")
             return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
         return card_top + rec + live + C["bold"] + C["cy"] + "╰─❯ " + C["reset"]

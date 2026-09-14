@@ -192,6 +192,11 @@ def dl_tree(app="", max_depth=6, limit=300, a=None):
     desk = _desktop()
     if desk is None:
         return "[LOI] không truy cập được AT-SPI (cần phiên desktop + at-spi2-core; cài: apt install python3-pyatspi)"
+    try:
+        max_depth = max(1, min(int(max_depth or 6), 12))
+        limit = max(1, min(int(limit or 300), 2000))
+    except Exception:
+        max_depth, limit = 6, 300
     with _lock:
         _snap["map"] = {}
     out = []
@@ -212,7 +217,12 @@ def dl_tree(app="", max_depth=6, limit=300, a=None):
 def _resolve(ref):
     with _lock:
         e = _snap["map"].get(ref)
-    return e.get("obj") if e else None
+    if not e:
+        return None
+    try:
+        return e.get("obj")
+    except Exception:
+        return None
 
 
 def _button_center(o):
@@ -237,8 +247,9 @@ def dl_click(ref="", name="", role="", a=None):
         target = (name or "").lower()
         rrole = (role or "").lower()
         for appobj in desk:
-            if _find_named(appobj, target, rrole) is not None:
-                obj = _find_named(appobj, target, rrole)
+            hit = _find_named(appobj, target, rrole)
+            if hit is not None:
+                obj = hit
                 break
         info = f"name='{name}' role='{role}'"
     if obj is None:
@@ -263,12 +274,14 @@ def dl_click(ref="", name="", role="", a=None):
     return f"[LOI] không có action AT-SPI và không có xdotool/bounds cho {info}."
 
 
-def _find_named(o, name, role):
+def _find_named(o, name, role, _depth=0):
+    if _depth > 14:
+        return None
     if _obj_name(o).lower() == name and (not role or _obj_role(o).lower() == role):
         return o
     try:
         for ch in o:
-            r = _find_named(ch, name, role)
+            r = _find_named(ch, name, role, _depth + 1)
             if r is not None:
                 return r
     except Exception:
@@ -281,9 +294,12 @@ def dl_type(text, clear=False, a=None):
     """Gõ text vào phần tử đang focus (xdotool). clear=True thì xoá giá trị cũ trước."""
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
+    text = str(text or "")
+    if len(text) > 8000:
+        return "[LOI] text quá dài (>8000 ký tự) — chia nhỏ ra"
     if clear:
         _run(["key", "ctrl+a"])
-    ok, msg = _run(["type", "--clearmodifiers", "--delay", "12", str(text)])
+    ok, msg = _run(["type", "--clearmodifiers", "--delay", "12", text])
     return f"OK: đã gõ {len(text)} ký tự." if ok else msg
 
 
@@ -299,7 +315,10 @@ def dl_key(combo, a=None):
 def dl_mouse(x, y, action="click", drag_to=None, a=None):
     if not _xd():
         return "[LOI] thiếu xdotool"
-    x, y = int(x), int(y)
+    try:
+        x, y = int(x), int(y)
+    except Exception:
+        return "[LOI] tọa độ x/y phải là số nguyên"
     if action == "move":
         ok, msg = _run(["mousemove", str(x), str(y)])
         return f"OK: trỏ chuột ({x},{y})." if ok else msg
@@ -436,22 +455,25 @@ def dl_find(query, app="", a=None):
     return header + "\n" + "\n".join(results) + "\nDùng ref at<id> cho dl_click."
 
 
-def dl_text(app="", a=None):
+def dl_text(app="", max_chars=12000, a=None):
     """Đọc toàn bộ text hiển thị trên desktop / 1 app (thay cho screenshot OCR)."""
     desk = _desktop()
     if desk is None:
         return "[LOI] không truy cập được AT-SPI"
+    try:
+        max_chars = max(500, min(int(max_chars or 12000), 40000))
+    except Exception:
+        max_chars = 12000
     texts = []
 
     def _collect(o, depth):
-        if len(texts) > 500:
+        if len(texts) > 500 or sum(len(t) for t in texts) > max_chars * 2:
             return
         role = _obj_role(o)
         name = _obj_name(o)
         if name and role.lower() not in ("application", "frame", "filler", "separator", "panel"):
-            texts.append(name)
+            texts.append(name[:500])
         try:
-            # Thử đọc text nội dung (document, terminal, editor)
             iface = o.queryInterface("Text")
             if iface:
                 t = iface.getText(0, min(iface.getCharacterCount(), 2000))
@@ -474,7 +496,10 @@ def dl_text(app="", a=None):
         return f"[LOI] {type(e).__name__}: {e}"
     if not texts:
         return "(không có text nào)"
-    return "\n".join(texts[:300])
+    out = "\n".join(texts[:300])
+    if len(out) > max_chars:
+        out = out[:max_chars] + f"\n...(cắt gọn {len(out) - max_chars} ký tự)"
+    return out
 
 
 # ── Macro recorder: GHI thao tác desktop rồi PHÁT LẠI ──────────────────────
@@ -632,7 +657,7 @@ def rec_play(name="", speed=1.0, a=None):
                 fail.append(f"b{i + 1}: tool lạ {st.get('tool')}")
                 continue
             if i:
-                time.sleep(max(0.2, min(float(st.get("dt", 0.5)) / sp, 5.0)))
+                time.sleep(max(0.08, min(float(st.get("dt", 0.5)) / sp, 1.5)))
             try:
                 r = fn(**(st.get("args") or {}))
                 if isinstance(r, str) and (r.startswith("[LOI]") or r.startswith("[TU CHOI]")):
@@ -671,7 +696,8 @@ TOOLS = [
          dl_find),
     Tool("dl_text", "ĐỌC TEXT hiển thị trên desktop / 1 app (thay cho screenshot OCR). "
          "Trả toàn bộ text đang thấy trên màn hình.",
-         schema({"app": {"type": "string", "description": "lọc theo app (rỗng = tất cả)", "default": ""}}),
+         schema({"app": {"type": "string", "description": "lọc theo app (rỗng = tất cả)", "default": ""},
+                 "max_chars": {"type": "integer", "description": "trần ký tự (500-40000, mặc định 12000)", "default": 12000}}),
          dl_text),
     Tool("dl_click", "CLICK phần tử trên desktop: theo ref at<id> (từ dl_tree/dl_find) HOẶC theo name/role.",
          schema({"ref": {"type": "string", "default": ""},

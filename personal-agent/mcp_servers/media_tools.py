@@ -142,13 +142,14 @@ async def _tts_async(text, path, voice, rate):
     for attempt in range(3):
         try:
             comm = edge_tts.Communicate(text, voice, rate=rate)
-            await comm.save(path)
+            await asyncio.wait_for(comm.save(path), timeout=30)
             if valid_audio(path):
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 return
         except Exception:
-            await asyncio.sleep(3 * (attempt + 1))
-    raise RuntimeError("edge-tts fail")
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+    raise RuntimeError("edge-tts fail (timeout 30s ×3)")
 
 
 def media_tts(text, voice="", out="", rate="-10%"):
@@ -226,6 +227,8 @@ def media_slideshow(cfg):
     scenes = cfg.get("scenes") or []
     if not scenes:
         return "[LOI] cần scenes (list các phân cảnh)"
+    if len(scenes) > 12:
+        return f"[LOI] tối đa 12 scene/lần (bạn gửi {len(scenes)}) — chia nhỏ ra"
     name = cfg.get("out") or time_tag()
     scene_paths = []
     report = []
@@ -238,9 +241,13 @@ def media_slideshow(cfg):
         if not os.path.isdir(os.path.dirname(sp)):
             os.makedirs(os.path.dirname(sp), exist_ok=True)
         if not valid_audio(sp):
-            tts(st, sp)
+            r2 = tts(st, sp)
+            if isinstance(r2, str) and r2.startswith("[LOI]"):
+                return f"[LOI] scene {i} TTS lỗi: {r2}"
         if not os.path.exists(ip):
-            media_image(s.get("prompt", st), tag)
+            r3 = media_image(s.get("prompt", st), tag)
+            if isinstance(r3, str) and r3.startswith("[LOI]"):
+                return f"[LOI] scene {i} tạo ảnh lỗi: {r3}"
         r = media_scene(ip, sp, vp, st)
         if r.startswith("[LOI]"):
             return r
@@ -263,7 +270,8 @@ def media_concat(files, out="", copy=True):
             return f"[LOI] thiếu file: {missing}"
         with open(lst, "w", encoding="utf-8") as f:
             for p in files:
-                f.write(f"file '{os.path.abspath(p)}'\n")
+                ap = os.path.abspath(p).replace("'", "'\\''")
+                f.write(f"file '{ap}'\n")
     elif files.endswith(".txt"):
         lst = files
     else:

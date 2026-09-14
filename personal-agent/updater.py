@@ -6,13 +6,17 @@
 - preflight: chạy trước khi Repl mở — báo (và tuỳ AUTO_UPDATE: tự) cập nhật.
 Mọi hàm đều an toàn: lỗi mạng/repo đều trả lại thông báo, KHÔNG bao giờ hỏng Repl.
 """
-import os, re, shutil, subprocess, sys, tarfile, tempfile, time
+import json, os, re, shutil, subprocess, sys, tarfile, tempfile, time
 
 import config
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))      # thư mục personal-agent/
 _REPO_ROOT = os.path.dirname(_ROOT)                      # thư mục gốc repo Rem007/
 _BRANCH_REF = f"origin/{config.GIT_BRANCH}"
+
+# Cache kết quả check bản mới (tránh mỗi lần mở Remtm lại GET GitHub raw mất ~1.5s).
+# TTL mặc định 6h. /checkupdate và /update luôn force (gọi mạng thật).
+_VER_CACHE = os.path.join(config.DIR, "update-check.json")
 
 
 def _ver_tuple(v):
@@ -23,12 +27,41 @@ def _ver_tuple(v):
     return t
 
 
+def _cache_load():
+    try:
+        with open(_VER_CACHE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("remote"), str):
+            return d.get("ts", 0), d["remote"]
+    except Exception:
+        pass
+    return 0, ""
+
+
+def _cache_save(remote):
+    try:
+        import tempfile as _tf
+        d = os.path.dirname(_VER_CACHE)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = _tf.mkstemp(dir=d, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "remote": remote}, f, ensure_ascii=False)
+        os.replace(tmp, _VER_CACHE)
+    except Exception:
+        pass
+
+
 def current_version():
     return config.VERSION
 
 
-def remote_version(timeout=config.UPDATE_CHECK_TIMEOUT):
-    """Version mới nhất trên GitHub (từ raw config.py). None nếu lỗi mạng."""
+def remote_version(timeout=config.UPDATE_CHECK_TIMEOUT, force=False):
+    """Version mới nhất trên GitHub (từ raw config.py). None nếu lỗi mạng.
+    force=False: trả version cache nếu chưa quá TTL (không gọi mạng → mở app nhanh)."""
+    if not force:
+        ts, cached = _cache_load()
+        if cached and (time.time() - ts) < config.UPDATE_CACHE_TTL:
+            return cached
     try:
         import requests
         # GitHub raw không cần VPN → đi thẳng, tránh sập theo xray lúc restart
@@ -36,7 +69,10 @@ def remote_version(timeout=config.UPDATE_CHECK_TIMEOUT):
                          proxies={"http": None, "https": None})
         r.raise_for_status()
         m = re.search(r'VERSION\s*=\s*["\']([\d.]+)["\']', r.text)
-        return m.group(1) if m else None
+        ver = m.group(1) if m else None
+        if ver:
+            _cache_save(ver)
+        return ver
     except Exception:
         return None
 
@@ -157,7 +193,7 @@ def _copy_cli_bins(lines):
 def update():
     """Cập nhật về bản mới nhất. Trả về (ok, new_version, [dòng thông báo])."""
     lines = []
-    rv = remote_version()
+    rv = remote_version(force=True)   # /update luôn lấy bản mới thật, bỏ qua cache
     if not rv:
         return False, config.VERSION, ["[!] Không lấy được bản mới từ GitHub (kiểm tra mạng)."]
     if _ver_tuple(rv) <= _ver_tuple(config.VERSION):

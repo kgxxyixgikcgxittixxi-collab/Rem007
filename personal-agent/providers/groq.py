@@ -214,6 +214,21 @@ _MODEL_URL = "https://api.groq.com/openai/v1/models"
 _DIRECT = {"http": None, "https": None}
 
 
+def _strip_reasoning(msgs):
+    """Bỏ reasoning/encrypted content khỏi message trước khi gửi Groq.
+    Gồm 'reasoning_content' (LangChain mapping), 'reasoning' (field chính thức
+    của Groq) và 'encrypted_content' (OpenAI Responses). Echo lại các field
+    này vào request sau có thể bị Groq từ chối → lỗi 400."""
+    _DROP = ("reasoning_content", "reasoning", "encrypted_content")
+    out = []
+    for m in msgs:
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            if any(k in m for k in _DROP):
+                m = {k: v for k, v in m.items() if k not in _DROP}
+        out.append(m)
+    return out
+
+
 def models(force=False):
     """Trả dict các model khả dụng từ API Groq, cache 5 phút."""
     now = time.time()
@@ -265,6 +280,31 @@ _NET_ERRS = ("ReadTimeout", "ConnectTimeout", "ConnectionError", "ReadError",
              "RemoteDisconnected", "ChunkedEncodingError", "ProxyError")
 # Lỗi 5xx/408: server quá tải → backoff ngắn + jitter rồi thử tiếp (không đốt cooldown)
 _SERVER_ERRS = (500, 502, 503, 504, 408)
+
+# Lỗi HTTP deterministic (400 context tràn, tool_use_failed...) — thử 23 key
+# vô ích, không đốt budget. Ghi chi tiết để chat_stream/agent trả lỗi cho agent
+# tự xử lý (vd compact context) thay vì báo "quá tải" mơ hồ.
+# Dùng threading.local — trước đây là global: helper thread (compact/text song song)
+# có thể ghi đè cờ khiến lượt chính trả lỗi sai.
+_TLS = threading.local()
+
+
+def _det_flag():
+    return _TLS.__dict__.setdefault("det_err", False)
+
+
+def _det_msg():
+    return _TLS.__dict__.get("last_err", "")
+
+
+def _set_det(err=False, msg=""):
+    _TLS.__dict__["det_err"] = err
+    _TLS.__dict__["last_err"] = msg
+
+
+def last_error():
+    """Lỗi HTTP cuối cùng (nếu gặp) — dùng để agent tự đánh giá, không spam log."""
+    return _det_msg()
 
 
 def _is_cancelled(cancel):
@@ -764,6 +804,7 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
         return None
     if _slow_cooldown(model):
         return None
+    _set_det(False, "")
     body = dict(body)
     effort = os.environ.get("REM_REASONING", "low").strip().lower()
     if model.startswith("openai/gpt-oss") and effort in ("low", "medium", "high"):
@@ -775,7 +816,9 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
     attempts = 0
     saw_rate = False  # lượt này đã gặp 429 key nào chưa (để đếm rotation cứu lượt)
     rate_hit = set()  # key nào 429/hết giới hạn lượt này → loại khỏi vòng pick, XOAY NGAY key khác
-    max_attempts = min(len(ks) + 4, 16)  # xoay 23 key độc lập; không khóa pool khi 1 key 429
+    # 23 key độc lập → thử TRỌN pool trước khi bỏ cuộc (mỗi key chỉ chịu ~1 request
+    # /phút vì 1 request ăn ~10K token ≈ trọn 8K TPM). Không giới hạn 16 như cũ.
+    max_attempts = len(ks) + 8
     end = time.time() + (budget if budget and budget > 0 else 75)
     import random as _rd
     # Stream: chờ connect 10s + giữa các chunk 30s là đủ (Groq thường trả chunk <5s).
@@ -795,6 +838,11 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
         attempts += 1
         choice, wait = _km.pick_key(ks, exclude=rate_hit)
         if choice is None:
+            break
+        if choice in rate_hit:
+            # pick_key chỉ trả key vừa 429 khi CẢ POOL đã cạn → ngừng quay,
+            # báo RATE cho caller (chat/chat_stream) backoff rồi thử lại đợt sau.
+            last = "RATE"
             break
         if wait > 0:
             if _sleep_cancel(min(wait, max(0.5, end - time.time())), cancel, end):
@@ -840,15 +888,40 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
                 continue
             else:
                 last = f"HTTP {r.status_code}"
+                # 4xx deterministic: context tràn (prompt_ctx_length), tool_use_failed,
+                # bad request... thử 23 key VÔ ÍCH (lỗi do request, không do key).
+                # Lấy message lỗi rõ ràng cho agent tự xử (compact context...).
+                _err_msg = ""
+                try:
+                    _ej = r.json()
+                    _err_msg = (_ej.get("error") or {}).get("message") or _ej.get("message") or ""
+                except Exception:
+                    _err_msg = ""
+                _ldet = f"HTTP {r.status_code}: {_err_msg[:300]}" if _err_msg else f"HTTP {r.status_code}"
+                if r.status_code == 400 and _err_msg and ("context" in _err_msg.lower()
+                                                          or "token" in _err_msg.lower()
+                                                          or "tool" in _err_msg.lower()):
+                    _set_det(True, _ldet)
+                    break
                 if r.status_code in (401, 403):
                     _km.report_auth_fail(choice)
+                    break
+                if r.status_code >= 400 and r.status_code < 500 and r.status_code != 408:
+                    # 400/404/422... lỗi request cố định → không retry key khác
+                    _km.report_failure(choice)
                     break
                 _km.report_failure(choice)
         except Exception as e:
             if _is_cancelled(cancel):
                 return None
             last = type(e).__name__
+            _ldet = f"{type(e).__name__}: {e}"
             _km.report_failure(choice, is_network=True)
+            # payload quá lớn → write-timeout/conn-abort: KHÔNG phải model chậm,
+            # không gắn cờ slow, không thử hết key — chặn ngay (deterministic).
+            if _ctx_guard(body.get("messages") or []):
+                _set_det(True, _ldet)
+                break
             if last in ("ReadTimeout", "ConnectTimeout"):
                 # Model chậm/kẹt → ghi slow (2 lần là nghỉ 5p), KHÔNG sleep hammer
                 # lại model đó; vòng sau chat_stream xoay sang model khác ngay.
@@ -867,8 +940,29 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
     return None
 
 
+def _ctx_guard(msgs):
+    """Pre-check độ dài prompt so với cửa sổ context gpt-oss (131K token, ~400K bytes UTF-8).
+    Prompt quá lớn → sớm cắt/thông báo thay vì để Groq trả 400 context_length_exceeded
+    hoặc connection-write-timeout rồi đốt 23 key. Trả chuỗi cảnh báo hoặc ''."""
+    try:
+        total = sum(len((m.get("content") or "").encode("utf-8", "replace"))
+                    for m in msgs if isinstance(msgs, list))
+        # ~3 bytes/token tiếng Việt → 131K token ≈ 350-400K bytes; giữ ngưỡng an toàn
+        if total > 350_000:
+            return (f"[CANH BAO] prompt quá dài ({total/1000:.0f} KB bytes ≈ vượt ~131K token). "
+                    "Hãy TÓM TẮT/triệt nội dung cũ trước khi gọi lại, KHÔNG gửi trọn.")
+    except Exception:
+        pass
+    return ""
+
+
 def chat(msgs, tools=None, budget=None, cancel=None):
     """Trả về message của model đầu tiên trả lời được trong khung thời gian budget."""
+    msgs = _strip_reasoning(msgs)
+    _warn = _ctx_guard(msgs)
+    if _warn:
+        # Context quá dài → không gửi gì cả (tiết kiệm 23 key + budget), báo rõ cho agent tự compact
+        return {"role": "assistant", "content": _warn}
     body = {"messages": msgs, "max_tokens": 16384}
     if tools:
         body["tools"] = tools
@@ -889,6 +983,10 @@ def chat(msgs, tools=None, budget=None, cancel=None):
                 return None
             if r == "RATE":
                 continue
+            if _det_flag():
+                # Lỗi request cố định (context tràn...) — agent cần SỬA request, không thử tiếp
+                return ({"role": "assistant", "content": f"[LOI {_det_msg()}]\n{_warn}"}
+                        if _det_msg() else None)
             if r is not None:
                 return r.json()["choices"][0]["message"]
             all_rate = False
@@ -960,9 +1058,12 @@ def _iter_stream(r, on_delta, cancel=None):
                 continue
             ch = (d.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
-            if delta.get("reasoning_content"):
-                acc["thinking"] += delta["reasoning_content"]
-                emit("thinking", delta["reasoning_content"])
+            # Groq gpt-oss trả reasoning ở `delta.reasoning` (field chính thức);
+            # `reasoning_content` chỉ là tên LangChain ánh xạ — đọc cả 2 cho chắc.
+            r_text = delta.get("reasoning") or delta.get("reasoning_content")
+            if r_text:
+                acc["thinking"] += r_text
+                emit("thinking", r_text)
             if delta.get("content"):
                 acc["content"] += delta["content"]
                 emit("content", delta["content"])
@@ -1018,7 +1119,16 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
     Có thể ép model qua env REM_MODEL=openai/gpt-oss-20b.
     cancel: ESC//stop hủy trong ≤0.5s. Model chậm (timeout 2 lần) bị bỏ qua 5 phút,
     xoay sang model nhanh ngay thay vì treo 70s×5 như bản cũ."""
-    body = {"messages": msgs, "max_tokens": 8192, "stream": True}
+    body = {"messages": _strip_reasoning(msgs), "max_tokens": 8192, "stream": True}
+    _warn = _ctx_guard(body["messages"])
+    if _warn:
+        # Context quá dài → không gửi (tiết kiệm budget + 23 key), báo rõ để agent compact
+        if on_delta:
+            try:
+                on_delta({"type": "content", "text": _warn})
+            except Exception:
+                pass
+        return {"role": "assistant", "content": _warn}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -1042,6 +1152,16 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
                       cancel=cancel, stream=True)
             if _is_cancelled(cancel):
                 return None
+            if _det_flag():
+                # Lỗi request cố định (context tràn...) — dừng ngay, trả lỗi để agent
+                # tự compact/trim thay vì tự thử lại hết 23 key.
+                if on_delta:
+                    try:
+                        on_delta({"type": "content", "text": f"[LOI {_det_msg()}]\n{_warn}"})
+                    except Exception:
+                        pass
+                return {"role": "assistant",
+                        "content": f"[LOI {_det_msg()}]\n{_warn}"}
             if r == "RATE":
                 # Key độc lập → 429 1 key chỉ cần xoay: thử model kế tiếp ngay
                 # (mỗi model lại xoay qua 23 key ở _post). KHÔNG ngủ chờ org.

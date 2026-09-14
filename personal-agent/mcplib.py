@@ -7,7 +7,7 @@ def recv_msg(stream):
     while True:
         line = stream.readline()
         if not line:
-            return None
+            return None  # EOF (server/client đóng) — duy nhất trả None
         if isinstance(line, bytes):
             line = line.decode("utf-8", "replace")
         line = line.rstrip("\r\n")
@@ -16,7 +16,7 @@ def recv_msg(stream):
         try:
             return json.loads(line)
         except ValueError:
-            return None
+            continue  # JSON hỏng — BỎ dòng rác, tiếp tục đọc dòng kế. TRƯỚC ĐÂY return None làm chết cả server.
 
 
 def send_msg(stream, msg):

@@ -112,24 +112,52 @@ def _dl_one(url, name=""):
     """Tải 1 ảnh về ~/.rem_ai/tmp/web_images/. Trả về (path, size, ctype)."""
     try:
         h = hashlib.md5(str(url).encode()).hexdigest()[:12]
-        # Ưu tiên curl_cffi (qua TLS mạnh), fallback requests
+        # Ưu tiên curl_cffi (qua TLS mạnh), fallback requests — stream để không OOM
+        data, ctype_hdr = b"", ""
         try:
             from curl_cffi import requests as _cr
             r = _cr.get(url, headers={**UA, "Referer": "https://duckduckgo.com/"},
-                        timeout=30, impersonate="chrome")
-        except Exception:
-            r = requests.get(url, headers={**UA, "Referer": "https://duckduckgo.com/"}, timeout=30)
-        if r.status_code != 200 or not getattr(r, "content", b""):
-            return None, 0, f"HTTP {r.status_code}"
-        ct = r.headers.get("content-type", "")
-        ext = ".png" if "png" in ct else (".jpg" if "jpeg" in ct or "jpg" in ct else ".webp")
-        if not r.content[:3]:
+                        timeout=30, stream=True, impersonate="chrome")
+            if r.status_code != 200:
+                return None, 0, f"HTTP {r.status_code}"
+            ctype_hdr = r.headers.get("content-type", "")
+            if not ctype_hdr.lower().startswith("image/"):
+                return None, 0, f"không phải ảnh ({ctype_hdr[:60]})"
+            buf = bytearray()
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                if chunk:
+                    buf.extend(chunk)
+                    if len(buf) > 12 * 1024 * 1024:
+                        return None, 0, "ảnh quá lớn (>12MB)"
+            data = bytes(buf)
+        except Exception as e:
+            # curl_cffi không stream/lỗi → fallback requests stream
+            try:
+                r = requests.get(url, headers={**UA, "Referer": "https://duckduckgo.com/"},
+                                 timeout=30, stream=True)
+                if r.status_code != 200:
+                    return None, 0, f"HTTP {r.status_code}"
+                ctype_hdr = r.headers.get("content-type", "")
+                if not ctype_hdr.lower().startswith("image/"):
+                    return None, 0, f"không phải ảnh ({ctype_hdr[:60]})"
+                buf = bytearray()
+                for chunk in r.iter_content(chunk_size=1 << 16):
+                    if chunk:
+                        buf.extend(chunk)
+                        if len(buf) > 12 * 1024 * 1024:
+                            return None, 0, "ảnh quá lớn (>12MB)"
+                data = bytes(buf)
+            except Exception as e2:
+                return None, 0, f"{type(e2).__name__}: {e2}"
+        if not data:
             return None, 0, "rỗng"
+        ct = ctype_hdr or ""
+        ext = ".png" if "png" in ct else (".jpg" if "jpeg" in ct or "jpg" in ct else ".webp")
         safe = re.sub(r"[^\w]+", "_", str(name))[:30] or ""
         p = os.path.join(_IMG_DIR, f"{safe}{h}{ext}" if safe else f"{h}{ext}")
         with open(p, "wb") as f:
-            f.write(r.content)
-        return p, len(r.content), ""
+            f.write(data)
+        return p, len(data), ""
     except Exception as e:
         return None, 0, f"{type(e).__name__}: {e}"
 
@@ -144,9 +172,11 @@ def web_download_image(url, name=""):
 
 def web_download_images(urls):
     """Tải NHIỀU ảnh cùng lúc. urls = danh sách URL (hoặc chuỗi tách bằng xuống dòng).
-    Trả về từng dòng: <đường dẫn> <size bytes> <url> và tổng dung lượng."""
+    Mỗi ảnh tối đa ~30s (trong _dl_one), tối đa 20 URL → tránh block server 50 phút."""
     if isinstance(urls, str):
         urls = re.split(r"[\n;]+", urls)
+    if isinstance(urls, (list, tuple)) and len(urls) > 20:
+        urls = list(urls)[:20]
     tot = 0
     rows = []
     for i, u in enumerate(urls, 1):
@@ -159,7 +189,7 @@ def web_download_images(urls):
             rows.append(f"{p} {sz} {u}")
         else:
             rows.append(f"[skip {err}] {u}")
-    rows.append(f"TỔNG: {tot} bytes ({len(rows) - 1} ảnh OK)")
+    rows.append(f"TỔNG: {tot} bytes ({max(0, len(rows) - 0)} mục)")
     return "\n".join(rows)
 
 

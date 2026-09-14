@@ -62,20 +62,28 @@ def skill_save(name, description, steps, tags="", a=None):
 
     steps: list [{"tool": tên, "args": {...}, "result_ok": bool}]
     """
+    name = (name or "").strip()[:80]
+    if not name:
+        return "[LOI] tên skill không được để trống"
+    if isinstance(steps, (list, tuple)):
+        saved = list(steps)[:_MAX_STEPS_IN_PROMPT]
+    else:
+        saved = []   # LLM gửi sai kiểu (string/dict) → không làm chết tool
     with _lock:
         existing = _load(name) or {}
         times = existing.get("times", 0)
+        saved = list(steps)[:_MAX_STEPS_IN_PROMPT]
         skill = {
-            "name": name.strip()[:80],
+            "name": name,
             "description": (description or "").strip()[:500],
             "tags": [t.strip() for t in (tags or "").split(",") if t.strip()][:10],
-            "steps": steps[:_MAX_STEPS_IN_PROMPT],
+            "steps": saved,
             "created": existing.get("created", time.strftime("%Y-%m-%d %H:%M")),
             "updated": time.strftime("%Y-%m-%d %H:%M"),
             "times": times + 1,
         }
         _save(skill)
-    return f"Đã lưu skill '{skill['name']}' ({len(steps)} bước, dùng lần {skill['times']})."
+    return f"Đã lưu skill '{skill['name']}' ({len(saved)} bước, dùng lần {skill['times']})."
 
 
 def skill_find(keyword="", a=None):

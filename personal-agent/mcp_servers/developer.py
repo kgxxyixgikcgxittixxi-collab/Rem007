@@ -147,7 +147,7 @@ DANGER = [
     "dd if=", "dd of=", "> /dev/sd", "of=/dev/sd", "chown -r 0",
     ":(){", "shutdown ", "reboot", "init 0", "mv / ", "chmod 777 /",
     "chown -r /", "wipefs", "shred /dev/", "diskutil erase",
-    "> /dev/null", "chmod -r 777 /",
+    "chmod -r 777 /",
 ]
 
 
@@ -389,31 +389,54 @@ def bash(command, timeout=SHELL_TIMEOUT):
 
 
 def read_file(path, max_chars=8000, offset=0, limit=0):
-    """Đọc file với line numbers. offset/limit = dòng (1-indexed). Thiếu file → gợi ý file gần nhất."""
+    """Đọc file với line numbers. offset/limit = dòng (1-indexed). Thiếu file → gợi ý file gần nhất.
+    Đọc THEO LUỒNG, dừng khi vượt max_chars — file log chục GB không OOM như readlines() cũ."""
     if not os.path.exists(path):
         suggest = _suggest_similar(path)
         return f"[LOI] không tìm thấy file: {path}" + (f"\n{suggest}" if suggest else "")
     if os.path.isdir(path):
         return f"[LOI] đây là thư mục: {path}"
     try:
+        max_chars = int(max(max_chars or 0, 1000))   # trần đọc tối thiểu 1KB
+    except Exception:
+        max_chars = 8000
+    try:
+        offset = int(offset or 0)
+        limit = int(limit or 0)
+    except Exception:
+        offset, limit = 0, 0
+    lines = []
+    total = 0
+    seen = 0
+    acc = 0
+    try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+            while True:
+                ln = f.readline()
+                if not ln:
+                    break
+                seen += 1
+                if offset > 0 and seen < offset:
+                    continue
+                total += 1
+                if limit > 0 and total > limit:
+                    acc += len(ln)   # vẫn tính tổng số dòng (để báo "còn N dòng")
+                    continue
+                lines.append(ln)
+                acc += len(ln)
+                if acc > max_chars * 2 and total >= 800:
+                    break            # đủ dữ liệu + về dòng → dừng đọc, không nạp cả file
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
-    total = len(all_lines)
-    # offset/limit = dòng (1-indexed), offset=0 nghĩa là từ đầu
     if offset > 0 or limit > 0:
         start = max(0, (offset or 1) - 1)
-        end = start + (limit or len(all_lines)) if limit else len(all_lines)
-        end = min(end, total)
-        lines = all_lines[start:end]
+        end = start + len(lines)
         numbered = [f"{i + 1:4d}: {ln.rstrip()}" for i, ln in enumerate(lines, start)]
-        header = f"File: {path} (dòng {start + 1}-{end}/{total})"
-        if end < total:
-            header += f" — còn {total - end} dòng nữa"
+        header = f"File: {path} (dòng {max(start, 1)}-{start + len(lines)}/{seen})"
+        if start + len(lines) < seen:
+            header += f" — còn {seen - (start + len(lines))} dòng nữa"
         return clamp(header + "\n" + "\n".join(numbered), max_chars)
-    # mặc định: hiển thị line numbers cho toàn bộ
-    numbered = [f"{i + 1:4d}: {ln.rstrip()}" for i, ln in enumerate(all_lines)]
+    numbered = [f"{i + 1:4d}: {ln.rstrip()}" for i, ln in enumerate(lines)]
     return clamp("\n".join(numbered), max_chars)
 
 
@@ -448,12 +471,66 @@ def edit_file(path, old, new):
     if old not in s:
         return "[LOI] không tìm thấy đoạn cần sửa (giữ nguyên chữ hoa/thường)"
     count = s.count(old)
+    orig = s
     s = s.replace(old, new, 1)
-    diff = _make_diff(s.replace(new, old, 1), s, path)
+    diff = _make_diff(orig, s, path)
     with open(path, "w", encoding="utf-8") as f:
         f.write(s)
     note = f" (có {count} lần trùng, chỉ sửa lần đầu)" if count > 1 else ""
     return f"Đã sửa xong{note}\n{diff}"
+
+
+_HEAVY_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv", "dist", "build",
+               ".cache", ".next", ".turbo", "target", "vendor", ".hg", ".svn"}
+
+def _apply_hunks(orig_text, plines):
+    """Áp nhiều hunk (bottom-up theo tọa độ old) — không lệch khi có nhiều hunk/xóa."""
+    # parse hunks: (old_start, old_count, body_lines)
+    hunks = []
+    cur_old = cur_cnt = None
+    cur_body = []
+    for ln in plines:
+        if ln.startswith("@@"):
+            if cur_old is not None:
+                hunks.append((cur_old, cur_cnt, cur_body))
+            m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", ln)
+            if m:
+                cur_old = int(m.group(1))
+                cur_cnt = int(m.group(2) or "1")
+            else:
+                cur_old = None
+                cur_cnt = 0
+            cur_body = []
+        elif cur_old is not None:
+            if ln.startswith(" ") or ln.startswith("+") or ln.startswith("-") or ln.startswith("\\"):
+                cur_body.append(ln)
+    if cur_old is not None:
+        hunks.append((cur_old, cur_cnt, cur_body))
+    if not hunks:
+        return None  # không có hunk hợp lệ
+    lines = orig_text.splitlines(True)
+    # bottom-up: hunk sau (old_start lớn) áp trước → không lệch tọa độ
+    for old_start, old_cnt, body in sorted(hunks, key=lambda x: x[0], reverse=True):
+        s = max(0, old_start - 1)
+        e = min(len(lines), s + old_cnt)
+        # kiểm tra context (tùy chọn): nếu lệch nhiều thì không crash, vẫn áp
+        repl = []
+        old_pos = s
+        for b in body:
+            if b.startswith("\\"):
+                continue
+            lead = b[0] if b else " "
+            raw = b[1:] if len(b) > 1 else ""
+            if lead == " ":
+                repl.append(lines[old_pos] if old_pos < len(lines) else raw + "\n")
+                old_pos += 1
+            elif lead == "-":
+                old_pos += 1
+            elif lead == "+":
+                repl.append(raw + ("\n" if not raw.endswith("\n") else ""))
+        # thay đoạn [s:e) bằng repl (repl đã chứa context + dòng mới)
+        lines[s:e] = repl
+    return "".join(lines)
 
 
 def apply_patch(patch_text):
@@ -461,19 +538,37 @@ def apply_patch(patch_text):
     if not patch_text or not patch_text.strip():
         return "[LOI] patch_text trống"
     lines = patch_text.splitlines()
-    # parse files from diff headers
+    # parse files from diff headers — bỏ qua /dev/null (tạo/xóa file)
     patches = []
     current_file = None
     current_lines = []
     for ln in lines:
-        if ln.startswith("+++ b/") or ln.startswith("+++ /"):
+        if ln.startswith("+++ b/"):
             if current_file and current_lines:
                 patches.append((current_file, current_lines))
-            current_file = ln[6:] if ln.startswith("+++ b/") else ln[6:]
+            current_file = ln[6:]
             current_lines = []
+        elif ln.startswith("+++ /dev/null"):
+            if current_file and current_lines:
+                patches.append((current_file, current_lines))
+            current_file = None  # xóa file — để hunk của file trước xử lý, bỏ qua /dev/null
+            current_lines = []
+        elif ln.startswith("+++ /"):
+            if current_file and current_lines:
+                patches.append((current_file, current_lines))
+            p = ln[6:]
+            if p == "/dev/null":
+                current_file = None
+                current_lines = []
+            else:
+                current_file = p
+                current_lines = []
         elif ln.startswith("--- a/") or ln.startswith("--- /"):
-            pass  # skip
+            pass
         elif ln.startswith("@@") or ln.startswith("+") or ln.startswith("-") or ln.startswith(" "):
+            if current_file:
+                current_lines.append(ln)
+        elif ln.startswith("\\"):
             if current_file:
                 current_lines.append(ln)
     if current_file and current_lines:
@@ -485,8 +580,17 @@ def apply_patch(patch_text):
         if _blocked(fpath):
             results.append(f"[TU CHOI] {fpath}: blocked")
             continue
-        # new file creation
-        if any(l.startswith("+") for l in plines) and all(not l.startswith("-") or l.startswith("---") for l in plines if l.strip()):
+        is_new = any(l.startswith("+") for l in plines) and not any(
+            l.startswith("-") and not l.startswith("---") for l in plines)
+        is_del = all(l.startswith("-") for l in plines if l.strip() and not l.startswith("---"))
+        if is_del:
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+                results.append(f"[XOÁ] {fpath}")
+            else:
+                results.append(f"[BỎ] {fpath} không tồn tại")
+            continue
+        if is_new and not os.path.isfile(fpath):
             content = "\n".join(l[1:] for l in plines if l.startswith("+"))
             parent = os.path.dirname(os.path.abspath(fpath))
             os.makedirs(parent, exist_ok=True)
@@ -494,55 +598,24 @@ def apply_patch(patch_text):
                 f.write(content)
             results.append(f"[TẠO] {fpath} ({len(content)} ký tự)")
             continue
-        # file deletion
-        if all(l.startswith("-") for l in plines if l.strip() and not l.startswith("---")):
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-                results.append(f"[XOÁ] {fpath}")
-            else:
-                results.append(f"[BỎ] {fpath} không tồn tại")
-            continue
-        # file modification — apply hunk by hunk
         if not os.path.isfile(fpath):
             results.append(f"[LOI] {fpath} không tồn tại")
             continue
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                orig_lines = f.readlines()
+                orig_text = f.read()
         except Exception as e:
             results.append(f"[LOI] {fpath}: {e}")
             continue
-        orig_text = "".join(orig_lines)
-        # simple hunk apply
-        new_content = []
-        i = 0
-        hunk_count = 0
-        for ln in plines:
-            if ln.startswith("@@"):
-                m = re.search(r"\+(\d+)", ln)
-                if m:
-                    i = int(m.group(1)) - 1
-                    while len(new_content) < i:
-                        idx = len(new_content)
-                        new_content.append(orig_lines[idx] if idx < len(orig_lines) else "\n")
-                hunk_count += 1
-            elif ln.startswith("+"):
-                new_content.append(ln[1:] + "\n")
-            elif ln.startswith("-"):
-                i += 1
-            elif ln.startswith(" "):
-                idx = i
-                new_content.append(orig_lines[idx] if idx < len(orig_lines) else ln[1:] + "\n")
-                i += 1
-        # fill remaining
-        while i < len(orig_lines):
-            new_content.append(orig_lines[i])
-            i += 1
+        new_text = _apply_hunks(orig_text, plines)
+        if new_text is None:
+            results.append(f"[LOI] {fpath}: không parse được hunk")
+            continue
         with open(fpath, "w", encoding="utf-8") as f:
-            f.write("".join(new_content))
+            f.write(new_text)
         fmt = _auto_format(fpath)
-        # Diff cũ/mới kiểu opencode: hiện cho người dùng thấy đã đổi gì
-        pdiff = _make_diff(orig_text, "".join(new_content), fpath)
+        hunk_count = sum(1 for ln in plines if ln.startswith("@@"))
+        pdiff = _make_diff(orig_text, new_text, fpath)
         results.append(f"[SỬA] {fpath} ({hunk_count} hunk){fmt}\n{pdiff}")
     return "\n".join(results)
 
@@ -573,12 +646,29 @@ def grep(pattern, root=".", include="*.py"):
         rx = re.compile(pattern)
     except re.error as e:
         return f"[LOI] pattern sai: {e}"
+    root = os.path.abspath(os.path.expanduser(root or "."))
+    if root == "/":
+        return "[LOI] không cho grep toàn bộ '/' — chỉ định thư mục dự án (vd root='.') "
+    include = (include or "*.py").strip() or "*.py"
     count = 0
-    for dp, _, fs in os.walk(os.path.expanduser(root)):
+    walked = 0
+    for dp, dirs, fs in os.walk(root, topdown=True, onerror=lambda e: None):
+        walked += 1
+        if walked > 40000:
+            hits.append(f"...(đã duyệt {walked} thư mục, dừng để tránh treo)")
+            break
+        # bỏ thư mục nặng trừ khi chính root là nó
+        if os.path.abspath(dp) != root:
+            dirs[:] = [d for d in dirs if d not in _HEAVY_DIRS and not d.startswith(".")]
         for f in fs:
             if not fnmatch.fnmatch(f, include):
                 continue
             fp = os.path.join(dp, f)
+            try:
+                if os.path.getsize(fp) > 8 * 1024 * 1024:
+                    continue
+            except Exception:
+                pass
             try:
                 with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
                     for i, line in enumerate(fh, 1):
@@ -592,9 +682,73 @@ def grep(pattern, root=".", include="*.py"):
     return "\n".join(hits) or "(không khớp)"
 
 
+def _glob_re(pat):
+    """Pattern glob (*,**,?,[]) → regex cho đường dẫn POSIX tương đối."""
+    i, out = 0, "^"
+    while i < len(pat):
+        c = pat[i]
+        if c == "*":
+            if i + 1 < len(pat) and pat[i + 1] == "*":
+                out += ".*"
+                i += 1
+                if i + 1 < len(pat) and pat[i + 1] == "/":
+                    out += "/?"
+                    i += 1
+            else:
+                out += "[^/]*"
+        elif c == "?":
+            out += "[^/]"
+        elif c == "[":
+            j = pat.find("]", i + 1)
+            if j == -1:
+                out += re.escape(c)
+            else:
+                out += pat[i:j + 1]
+                i = j
+        else:
+            out += re.escape(c)
+        i += 1
+    return re.compile(out + "$")
+
+
 def glob_files(pattern, root="."):
-    hits = _glob.glob(os.path.join(os.path.expanduser(root), pattern), recursive=True)
-    hits = [fp for fp in sorted(hits)][:300]
+    pat = (pattern or "**").strip() or "**"
+    root = os.path.abspath(os.path.expanduser(root or "."))
+    if root == "/":
+        return "[LOI] không cho glob toàn bộ '/' — chỉ định thư mục dự án"
+    # không có wildcard → kiểm tra trực tiếp
+    if not any(c in pat for c in "*?["):
+        full = os.path.join(root, pat)
+        return full if os.path.exists(full) else "(không tìm thấy file nào)"
+    # có wildcard → walk có trần + bỏ thư mục nặng
+    try:
+        rx = _glob_re(pat.lstrip("/"))
+    except Exception:
+        rx = None
+    hits = []
+    walked = 0
+    for dp, dirs, fs in os.walk(root, topdown=True, onerror=lambda e: None):
+        walked += 1
+        if walked > 50000:
+            break
+        if os.path.abspath(dp) != root:
+            dirs[:] = [d for d in dirs if d not in _HEAVY_DIRS]
+        rel_dp = os.path.relpath(dp, root)
+        for f in fs:
+            rel = os.path.join(rel_dp, f) if rel_dp != "." else f
+            rel_posix = rel.replace(os.sep, "/")
+            ok = False
+            if rx is not None:
+                ok = bool(rx.match(rel_posix))
+            else:
+                ok = fnmatch.fnmatch(rel_posix, pat.lstrip("/"))
+            if ok:
+                hits.append(os.path.join(root, rel))
+                if len(hits) >= 300:
+                    break
+        if len(hits) >= 300:
+            break
+    hits = sorted(hits)[:300]
     return "\n".join(hits) if hits else "(không tìm thấy file nào)"
 
 
@@ -674,6 +828,10 @@ def ensure_tool(name, timeout=600):
         cmd = ["pkg", "install", "-y", name]; label = "pkg"
     else:
         cmd = ["sudo", "apt-get", "install", "-y", name]; label = "apt-get"
+    try:
+        timeout = max(1, min(int(timeout or 600), 600))   # trần — LLM gửi timeout khổng lồ không treo server
+    except Exception:
+        timeout = 600
     _log(f"INSTALL_TOOL {name} via {label}")
     try:
         r = subprocess.run(cmd, cwd=CWD[0], capture_output=True, text=True,
@@ -708,6 +866,10 @@ def pip_install(pkg, timeout=600):
     author = info.get("author") or info.get("author_email") or "?"
     py = _ensure_venv() or sys.executable
     snapshot = _venv_snapshot()
+    try:
+        timeout = max(1, min(int(timeout or 600), 600))   # trần — chống treo server
+    except Exception:
+        timeout = 600
     _log(f"PIP_INSTALL {name} (PyPI: {base}=={version} by {author})")
     try:
         r = subprocess.run([py, "-m", "pip", "install", "--quiet", name],
@@ -772,6 +934,8 @@ def make_pdf(title, body, out=None):
         out = os.path.abspath(os.path.expanduser(out))
     except Exception:
         out = os.path.abspath(out)
+    if _blocked(out):
+        return "[TU CHOI] không được ghi PDF vào thư mục runtime/keys của agent"
     reg, bold = _pdf_fonts()
     if not reg:
         return "[LOI] không tìm thấy font Unicode (DejaVu/Liberation/Noto) trên máy"
@@ -820,25 +984,43 @@ def make_pdf(title, body, out=None):
 
 # ── subagent (kiểu opencode Task) ────────────────────────────────────────────
 
-def task(description, session_id=""):
-    """Chạy agent con độc lập trong tiến trình này: đủ tool riêng (file/bash/web/LSP),
-    session riêng, tự quản lý permission (mặc định auto). Chạy tối đa MAX_TASK_SECONDS."""
+def task(description, session_id="", timeout=120):
+    """Chạy agent con độc lập (bị extensions.Manager._run_subagent chặn ở trên,
+    nhưng vẫn giữ bản MCP này cho trường hợp gọi trực tiếp). Có timeout."""
     from agentloop import Agent
     from extensions import Manager
     from permissions import Presets
+    import threading as _th
     sid = session_id or None
     try:
-        m = Manager()
-        m.start_all()
-        agent = Agent(m, Presets.build(), sid=sid)
+        timeout = max(10, min(int(timeout or 120), 240))
+    except Exception:
+        timeout = 120
+    box = {}
+
+    def _do():
+        m = None
         try:
-            out = agent.run(description)
+            m = Manager()
+            m.start_all()
+            agent = Agent(m, Presets.build(), sid=sid)
+            box["out"] = agent.run(description)
+        except Exception as e:
+            box["out"] = f"[LOI] subagent: {type(e).__name__}: {e}"
         finally:
-            m.close_all()
-        text = str(out or "(trống)").strip()
-        return text[:MAX_TOOL_OUT] + ("\n[SUBAGENT CẮT GỌN]" if len(text) > MAX_TOOL_OUT else "")
-    except Exception as e:
-        return f"[LOI] subagent: {type(e).__name__}: {e}"
+            try:
+                if m is not None:
+                    m.close_all()
+            except Exception:
+                pass
+
+    th = _th.Thread(target=_do, daemon=True)
+    th.start()
+    th.join(timeout=timeout)
+    if th.is_alive():
+        return f"[LOI] subagent quá hạn {timeout}s — hãy chia nhỏ việc hơn"
+    text = str(box.get("out") or "(trống)").strip()
+    return text[:MAX_TOOL_OUT] + ("\n[SUBAGENT CẮT GỌN]" if len(text) > MAX_TOOL_OUT else "")
 
 
 # ── tools table ──────────────────────────────────────────────────────────────
@@ -903,7 +1085,9 @@ TOOLS = [
     Tool("make_pdf",
          "Tạo file PDF chuẩn tiếng Việt (font Unicode DejaVu, KHÔNG vỡ dấu). "
          "title = tiêu đề; body = đoạn văn hoặc mảng đoạn (hỗ trợ '## ' tiêu đề mục, '- ' gạch đầu dòng); "
-         "out = đường dẫn PDF (mặc định ~/Downloads/rem_*.pdf).",
+         "out = đường dẫn PDF (mặc định ~/Downloads/rem_*.pdf). "
+         "LƯU Ý: text thuần chỉ đạt ~0,5MB cho hàng nghìn đoạn — PDF >10MB PHẢI gắn ảnh JPEG "
+         "chất lượng cao (~40-60 ảnh 150-400KB) bằng script reportlab riêng, KHÔNG dùng make_pdf để làm PDF lớn.",
          schema({"title": {"type": "string", "description": "tiêu đề PDF"},
                  "body": {"type": "string", "description": "nội dung (string hoặc mảng đoạn văn)"},
                  "out": {"type": "string", "description": "(tùy chọn) đường dẫn file PDF"}}), make_pdf),

@@ -13,7 +13,15 @@ import social_auto as _sa
 
 
 def social_cycle(a=None):
-    return _sa.run_social_cycle()
+    import concurrent.futures as _cf
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            fut = _ex.submit(_sa.run_social_cycle)
+            return fut.result(timeout=120)
+    except _cf.TimeoutError:
+        return "[LOI] social_cycle quá 120s — thử lại sau"
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
 
 
 def social_report(a=None):

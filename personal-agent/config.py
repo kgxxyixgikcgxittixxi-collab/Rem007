@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.70"
+VERSION = "3.76"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -108,4 +108,5 @@ REMOTE_CONFIG = f"https://raw.githubusercontent.com/{GIT_REPO}/{GIT_BRANCH}/pers
 REPO_TARBALL = f"https://github.com/{GIT_REPO}/archive/refs/heads/{GIT_BRANCH}.tar.gz"
 AUTO_UPDATE = os.environ.get("REM_AUTO_UPDATE", "1") == "1"  # REM_AUTO_UPDATE=0 để chỉ báo, không tự update
 UPDATE_CHECK_TIMEOUT = 6    # giây tối đa chờ kiểm tra bản mới
+UPDATE_CACHE_TTL = int(os.environ.get("REM_UPDATE_TTL", str(6 * 3600)))  # 6h — preflight check dùng cache, /update force mạng
 UPDATE_TIMEOUT = 120        # giây tối đa cho 1 lần cập nhật

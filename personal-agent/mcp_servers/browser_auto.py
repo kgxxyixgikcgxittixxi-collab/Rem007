@@ -183,6 +183,9 @@ def browser_click_text(text, index=0):
 def browser_type(selector, text, clear=False):
     try:
         page = _ensure()
+        text = str(text or "")
+        if len(text) > 4000:
+            return "[LOI] text quá dài (>4000 ký tự) — chia nhỏ ra"
         el = page.locator(selector).first
         el.scroll_into_view_if_needed()
         el.click()
@@ -219,11 +222,15 @@ def browser_screenshot(full=False, name=""):
 def browser_content(max_chars=8000, text=True):
     try:
         page = _ensure()
+        try:
+            max_chars = max(200, min(int(max_chars or 8000), 60000))
+        except Exception:
+            max_chars = 8000
         if text:
             body = page.inner_text("body")
         else:
             body = page.content()
-        return clamp(body, int(max_chars)) + f"\n--- URL: {page.url}"
+        return clamp(body, max_chars) + f"\n--- URL: {page.url}"
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
 
@@ -241,9 +248,17 @@ def browser_wait(selector=None, timeout=15000, sleep=1.0):
     try:
         page = _ensure()
         if selector:
-            page.wait_for_selector(selector, timeout=int(timeout))
+            try:
+                timeout = max(500, min(int(timeout or 15000), 30000))
+            except Exception:
+                timeout = 15000
+            page.wait_for_selector(selector, timeout=timeout)
         else:
-            time.sleep(float(sleep))
+            try:
+                sleep = max(0.1, min(float(sleep or 1.0), 10.0))
+            except Exception:
+                sleep = 1.0
+            time.sleep(sleep)
         return f"Đã chờ. URL: {page.url}"
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
@@ -265,13 +280,17 @@ def browser_search(q, n=5):
     if page is None:
         return _ERR or '[LOI] trình duyệt chưa sẵn sàng'
     try:
+        try:
+            n = max(1, min(int(n or 5), 10))
+        except Exception:
+            n = 5
         page.goto("https://www.bing.com/search", wait_until="domcontentloaded")
         page.fill("#sb_form_q", q)
         page.press("#sb_form_q", "Enter")
         page.wait_for_timeout(2500)
-        results = page.locator("li.b_algo").all()[: int(n)]
+        results = page.locator("li.b_algo").all()[:n]
         if not results:
-            results = page.locator("li.b_algo, li.b_pag, .b_results li").all()[: int(n)]
+            results = page.locator("li.b_algo, li.b_pag, .b_results li").all()[:n]
         out = []
         for i, r in enumerate(results, 1):
             try:
