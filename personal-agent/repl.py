@@ -86,6 +86,9 @@ def _is_inject_noise(text):
     """Lọc dòng rác terminal paste nhầm (prompt/logo/status echo) — không đẩy cho agent."""
     import re as _re
     t = (text or "").strip()
+    # Lời đáp 1 ký tự thật (ừ/ờ/ạ) — giữ, không coi là rác paste.
+    if t in ("ừ", "ờ", "ạ", "ừm", "ờm"):
+        return False
     if not t or len(t) <= 1:
         return True
     if any(k in t for k in ("╭─❯", "╰─❯", "📥 Đã chuyển", "⏳ ❯", "⏳(",
@@ -187,8 +190,8 @@ C = {
     "wh": "\033[37m",  # trắng — nội dung trả lời của agent
     "clear": "\033[2J", "home": "\033[H",
 }
-# Prefix phân biệt rõ người dùng vs agent
-P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối (chỉ tiền tố, nội dung để trắng)
+# Prefix phân biệt rõ người dùng vs agent (dựng inline từng chỗ, không dùng const chung
+# để tránh lệch màu khi theme đổi giữa phiên — xem _theme/themes.py).
 P_AGENT = "\033[1m\033[96m❯\033[0m "       # kiểu opencode: dấu ❯ nổi bật
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
@@ -207,6 +210,10 @@ def _apply_theme_c():
                 os.remove(_THEMES_PATH)
             except Exception:
                 pass
+        # Biến môi trường cũ REM_THEME → migrate 1 lần rồi thôi
+        _env_th = (os.environ.get("REM_THEME") or "").strip()
+        if _env_th and not themes.load_tui().get("theme") and _env_th in themes.list_themes():
+            themes.save_tui({"theme": _env_th})
     except Exception:
         pass
     try:
@@ -248,8 +255,7 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TOOL_LABEL = {
     "read_file": "Read", "write_file": "Write", "edit_file": "Edit",
     "apply_patch": "Patch", "bash": "Bash", "bash_poll": "Job", "list_dir": "List",
-    "glob_files": "Glob", "grep": "Grep", "web_search": "WebSearch",
-    "web_fetch": "WebFetch", "web_images": "WebImg", "web_download_image": "DlImg",
+    "glob_files": "Glob", "grep": "Grep", "repo_map": "RepoMap", "web_search": "WebSearch",    "web_fetch": "WebFetch", "web_images": "WebImg", "web_download_image": "DlImg",
     "web_download_images": "DlImgs", "remember": "Remember", "recall": "Recall",
     "ensure_tool": "Setup", "pip_install": "PyPI", "make_pdf": "PDF", "github_api": "GitHub",
     "todo_list": "Todo", "todo_write": "Todo", "task": "Task",
@@ -623,6 +629,8 @@ _SLASH_CAT = {
     "/theme":        ("Cấu hình", "Đổi bảng màu giao diện", "tên (nhập trống để xem)", ("/themes",)),
     "/details":      ("Hiển thị", "Bật/tắt chi tiết tool (3 dòng đầu result)", "[on|off]", ()),
     "/plan":         ("Quyền hạn", "Chuyển preset PLAN (chỉ đọc)", "", ()),
+    "/plansave":     ("Quyền hạn", "Lưu kế hoạch vừa lập thành file plans/", "", ()),
+    "/newtask":      ("Lịch sử", "Bàn giao việc sang session mới (giữ tóm tắt)", "[mô tả]", ()),
     "/build":        ("Quyền hạn", "Quay lại preset BUILD", "", ("/agent",)),
     "/lsp":          ("Phát triển", "Kiểm tra lỗi file nguồn (clangd/pylsp)", "<file>", ()) ,
     "/review":       ("Phát triển", "Review diff git + lỗi LSP bằng agent con", "", ()),
@@ -705,7 +713,6 @@ def _type(s, col=None):
         return
     text = s if col is None else (C.get(col, "") + s + C["reset"])
     with _OUT_LOCK:
-        global _HOLD_REDRAW
         r = _input_state()
         hold = _HOLD_REDRAW
         if r is not None and not hold:
@@ -2387,6 +2394,49 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             out = f"[LOI] review: {type(e).__name__}: {e}"
         _p(out or "(rỗng)", "gr")
 
+    def _plan_save(self):
+        """Lưu kế hoạch (tin assistant cuối) thành artifact kiểu Cursor ~/.cursor/plans."""
+        if self._busy:
+            _p("Agent đang bận — đợi hết lượt rồi gõ /plansave.", "ye")
+            return
+        msgs = sessions.load(self.sid)
+        plans = [m.get("content") or "" for m in msgs
+                 if m.get("role") == "assistant" and (m.get("content") or "").strip()]
+        if not plans:
+            _p("Chưa có kế hoạch nào (hỏi agent lập kế hoạch trước, ở preset PLAN).", "dim")
+            return
+        import time as _t
+        d = os.path.join(config.DIR, "plans")
+        try:
+            os.makedirs(d, exist_ok=True)
+            fp = os.path.join(d, f"{self.sid}-{_t.strftime('%H%M%S')}.md")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(f"# Kế hoạch — session {self.sid}\n\n{plans[-1].strip()}\n")
+            _p(f"Đã lưu kế hoạch → {fp} (sửa file rồi bảo agent 'làm theo file này').", "gr")
+        except Exception as e:
+            _p(f"[LOI] không lưu được plan: {e}", "rd")
+
+    def _new_task(self, desc):
+        """Bàn giao kiểu Cline /newtask: tóm tắt phiên cũ, mở session mới giữ tóm tắt."""
+        if self._busy:
+            _p("Agent đang bận — đợi hết lượt rồi gõ /newtask.", "ye")
+            return
+        old = self.sid
+        try:
+            msgs = sessions.load(old)
+            ctx = "\n".join(str(m.get("content") or "")[:800]
+                            for m in msgs[-12:] if m.get("role") in ("user", "assistant"))
+            summary = (ctx[:2500] + "…") if len(ctx) > 2500 else ctx
+        except Exception:
+            summary = ""
+        self.sid = sessions.new()
+        self._mk_agent(sid=self.sid)
+        self.presets = "build"
+        handoff = ((desc + "\n\n") if desc else "") + (
+            "[BÀN GIAO TỪ PHIÊN CŨ — tóm tắt, làm tiếp, không làm lại]\n" + (summary or "(phiên cũ trống)"))
+        sessions.append(self.sid, {"role": "user", "content": handoff})
+        _p(f"Đã bàn giao {old} → session mới {self.sid} (tóm tắt giữ lại).", "gr")
+
     def slash(self, line):
         cmd = line.strip()
         parts = cmd.split()
@@ -2640,6 +2690,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             self._agent.perm = Presets.plan()
             self.presets = "plan"
             _p("Đã chuyển preset PLAN — tool ghi/đổi thư mục/fetch web bị CẤM.", "ye")
+            # Artifact kiểu Cursor: lưu kế hoạch agent trả ra thành file để review/sửa.
+            # Cách dùng: /plan xong hỏi agent 'lập kế hoạch ...', rồi /plansave để lưu.
+        elif cmd == "/plansave":
+            self._plan_save()
+        elif cmd == "/newtask" or cmd.startswith("/newtask "):
+            self._new_task(cmd[len("/newtask"):].strip())
         elif cmd == "/build" or cmd == "/agent":
             self._agent.perm = Presets.build()
             self.presets = "build"

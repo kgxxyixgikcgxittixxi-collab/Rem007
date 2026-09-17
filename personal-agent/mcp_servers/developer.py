@@ -2,9 +2,9 @@ import os, sys, json, time, difflib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import fnmatch, glob as _glob, re, shutil, subprocess, requests as _req
+import fnmatch, re, shutil, subprocess, requests as _req
 from mcplib import Server, Tool, schema, clamp
-from config import DIR, TMP, TERMUX, SHELL_TIMEOUT, MAX_TOOL_OUT
+from config import DIR, TERMUX, SHELL_TIMEOUT, MAX_TOOL_OUT
 
 PVENV = os.path.join(DIR, "venv")
 PVENV_PY = os.path.join(PVENV, "bin", "python")
@@ -430,7 +430,6 @@ def read_file(path, max_chars=8000, offset=0, limit=0):
         return f"[LOI] {type(e).__name__}: {e}"
     if offset > 0 or limit > 0:
         start = max(0, (offset or 1) - 1)
-        end = start + len(lines)
         numbered = [f"{i + 1:4d}: {ln.rstrip()}" for i, ln in enumerate(lines, start)]
         header = f"File: {path} (dòng {max(start, 1)}-{start + len(lines)}/{seen})"
         if start + len(lines) < seen:
@@ -756,6 +755,101 @@ def cwd():
     return CWD[0]
 
 
+def repo_map(root=".", max_files=120, max_chars=12000):
+    """Bản đồ repo kiểu aider/continue: cây thư mục + class/hàm/signature mỗi file.
+    Chỉ dùng stdlib (ast + regex), bỏ qua .git/node_modules/__pycache__/venv.
+    Trả text gọn để agent nắm toàn codebase trong 1 lần gọi."""
+    import ast as _ast
+    _skip = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
+             ".pytest_cache", "dist", "build", ".next", "target", "__snapshots__"}
+    _exts = {".py", ".js", ".ts", ".tsx", ".jsx", ".c", ".h", ".cpp", ".hpp",
+             ".java", ".go", ".rs", ".sh", ".md"}
+    _rx = [
+        (".js", r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("),
+        (".js", r"^\s*(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)"),
+        (".c", r"^\s*[A-Za-z_][\w\s\*]*?\s+([A-Za-z_]\w*)\s*\([^;]*\)\s*\{?"),
+        (".go", r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\("),
+        (".rs", r"^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)"),
+        (".java", r"^\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\]]+\s+([A-Za-z_]\w*)\s*\("),
+        (".sh", r"^\s*([A-Za-z_]\w*)\s*\(\s*\)"),
+    ]
+    try:
+        base = CWD[0]
+        root = root or "."
+        rp = root if os.path.isabs(root) else os.path.join(base, os.path.expanduser(root))
+        rp = os.path.realpath(rp)
+    except Exception:
+        rp = os.getcwd()
+    if not os.path.isdir(rp):
+        return f"[LOI] không phải thư mục: {root}"
+    found = []
+    try:
+        for dp, dns, fns in os.walk(rp):
+            try:
+                dns[:] = sorted(d for d in dns if d not in _skip and not d.startswith("."))
+            except Exception:
+                pass
+            for fn in sorted(fns):
+                if os.path.splitext(fn)[1] in _exts:
+                    fp = os.path.join(dp, fn)
+                    try:
+                        if os.path.getsize(fp) <= 300000:
+                            found.append(fp)
+                    except Exception:
+                        pass
+            if len(found) >= max_files:
+                break
+    except Exception as e:
+        return f"[LOI] duyệt repo: {e}"
+    found = found[:max(1, int(max_files or 120))]
+    out = [f"REPO MAP: {rp} ({len(found)} file)"]
+    for fp in found:
+        rel = os.path.relpath(fp, rp)
+        ext = os.path.splitext(fp)[1]
+        syms = []
+        try:
+            txt = open(fp, encoding="utf-8", errors="replace").read(200000)
+        except Exception:
+            out.append(f"  {rel} (?)")
+            continue
+        if ext == ".py":
+            try:
+                tree = _ast.parse(txt)
+                for nd in tree.body:
+                    if isinstance(nd, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        an = [a.arg for a in nd.args.args]
+                        syms.append(f"def {nd.name}({', '.join(an)})")
+                    elif isinstance(nd, _ast.ClassDef):
+                        syms.append(f"class {nd.name}")
+                        for s in nd.body[:12]:
+                            if isinstance(s, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                                an = [a.arg for a in s.args.args]
+                                syms.append(f"  .{s.name}({', '.join(an)})")
+            except SyntaxError:
+                syms.append("(lỗi cú pháp)")
+        else:
+            pats = [p for e, p in _rx if e == ext or (ext in (".h", ".hpp", ".cpp") and e == ".c")
+                    or (ext in (".tsx", ".jsx", ".ts") and e == ".js")]
+            import re as _re
+            for ln in txt.splitlines():
+                if len(syms) >= 40:
+                    break
+                for p in pats:
+                    m = _re.match(p, ln)
+                    if m:
+                        syms.append(m.group(1) + "()")
+                        break
+        out.append(f"  {rel}")
+        for s in syms[:40]:
+            out.append(f"    {s}")
+        if len(syms) > 40:
+            out.append(f"    … (+{len(syms) - 40})")
+    res = "\n".join(out)
+    if len(res) > max_chars:
+        res = res[:max_chars] + f"\n…[cắt {len(res) - max_chars} ký tự — thu hẹp root hoặc tăng max_chars]"
+    return res
+
+
 def chdir(path):
     p = os.path.expanduser(path)
     if not os.path.isdir(p):
@@ -1056,7 +1150,12 @@ TOOLS = [
     Tool("grep", "Tìm regex trong file.",
          schema({"pattern": {"type": "string"}, "root": {"type": "string"}, "include": {"type": "string"}}), grep),
     Tool("glob_files", "Tìm file theo glob pattern (vd **/*.py).",
-         schema({"pattern": {"type": "string"}, "root": {"type": "string"}}), glob_files),
+          schema({"pattern": {"type": "string"}, "root": {"type": "string"}}), glob_files),
+    Tool("repo_map", "Bản đồ repo kiểu aider: cây thư mục + class/hàm/signature mỗi file "
+          "(ast+regex, stdlib). Gọi 1 lần để nắm toàn codebase trước khi sửa code lạ.",
+          schema({"root": {"type": "string", "description": "thư mục gốc, mặc định ."},
+                  "max_files": {"type": "integer", "description": "tối đa file, mặc định 120"},
+                  "max_chars": {"type": "integer", "description": "tối đa ký tự, mặc định 12000"}}), repo_map),
     Tool("cwd", "Xem thư mục làm việc hiện tại.", schema({}), cwd),
     Tool("chdir", "Đổi thư mục làm việc.",
          schema({"path": {"type": "string"}}), chdir),

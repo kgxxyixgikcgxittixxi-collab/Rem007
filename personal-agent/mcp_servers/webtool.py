@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import html as _html, re, os, hashlib
 import requests
 from mcplib import Server, Tool, schema, clamp
-from config import TMP, MAX_TOOL_OUT
+from config import TMP
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -130,7 +130,7 @@ def _dl_one(url, name=""):
                     if len(buf) > 12 * 1024 * 1024:
                         return None, 0, "ảnh quá lớn (>12MB)"
             data = bytes(buf)
-        except Exception as e:
+        except Exception:
             # curl_cffi không stream/lỗi → fallback requests stream
             try:
                 r = requests.get(url, headers={**UA, "Referer": "https://duckduckgo.com/"},

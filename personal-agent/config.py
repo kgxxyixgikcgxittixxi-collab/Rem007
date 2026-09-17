@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.87"
+VERSION = "3.88"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -19,50 +19,9 @@ LOGO = r"""
 """
 DEBUG = os.environ.get("REM_DEBUG", "0") == "1"
 
-# ── Bảng màu giao diện (REPL). Đổi lúc chạy bằng /theme <tên>.
-# Mỗi theme map tên màu → mã ANSI; code chỉ dùng khóa qua C[] nên đổi theme
-# là đổi mã ngay không cần sửa UI. Xem tổng hợp bởi repl._apply_theme_c().
-THEMES = {
-    "default": {
-        "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
-        "cy": "\033[96m", "gr": "\033[92m", "ye": "\033[93m",
-        "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
-        "lm": "\033[92m", "ob": "\033[34m", "wh": "\033[37m",
-        "clear": "\033[2J", "home": "\033[H",
-    },
-    "ocean": {
-        "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
-        "cy": "\033[36m", "gr": "\033[32m", "ye": "\033[33m",
-        "rd": "\033[91m", "mg": "\033[35m", "bl": "\033[34m",
-        "lm": "\033[92m", "ob": "\033[36m", "wh": "\033[97m",
-        "clear": "\033[2J", "home": "\033[H",
-    },
-    "sunset": {
-        "reset": "\033[0m", "dim": "\033[90m", "bold": "\033[1m",
-        "cy": "\033[93m", "gr": "\033[92m", "ye": "\033[33m",
-        "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
-        "lm": "\033[92m", "ob": "\033[95m", "wh": "\033[37m",
-        "clear": "\033[2J", "home": "\033[H",
-    },
-    "mono": {
-        "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
-        "cy": "\033[37m", "gr": "\033[37m", "ye": "\033[37m",
-        "rd": "\033[37m", "mg": "\033[37m", "bl": "\033[37m",
-        "lm": "\033[37m", "ob": "\033[37m", "wh": "\033[37m",
-        "clear": "\033[2J", "home": "\033[H",
-    },
-}
-REPL_THEME = os.environ.get("REM_THEME", "default")
-# theme đã đổi bằng /theme giữa phiên → ưu tiên file đã lưu
-try:
-    with open(os.path.join(DIR, "rem_theme"), "r", encoding="utf-8") as _f:
-        _saved = _f.read().strip()
-    if _saved:
-        REPL_THEME = _saved
-except Exception:
-    pass
-if REPL_THEME not in THEMES:
-    REPL_THEME = "default"
+# ── Bảng màu giao diện: MỘT hệ duy nhất là themes.py (tui.json, kiểu opencode).
+# Khối THEMES/REPL_THEME cũ đã xóa ở v3.88 (không còn ai dùng sau khi /theme
+# chuyển sang themes.py; file ~/.rem_ai/rem_theme cũ được migrate 1 lần).
 MODEL_CHAT = "openai/gpt-oss-120b"
 MODEL_CLONE = "openai/gpt-oss-120b"
 MODEL_VISION = "meta-llama/llama-3.2-11b-vision-instruct"

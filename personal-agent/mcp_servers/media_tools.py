@@ -2,7 +2,7 @@ import os, sys, re, json, asyncio, random, subprocess, urllib.parse, urllib.requ
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcplib import Server, Tool, schema, clamp
+from mcplib import Server, Tool, schema
 from config import DIR
 
 # Công cụ làm video/tạo nội dung đa phương tiện: TTS tiếng Việt, sinh ảnh AI,

@@ -42,7 +42,7 @@ MACRO_CATS["khac"] = {"desc": "việc khác không thuộc nhóm trên", "module
 
 _ROUTE_KW = [
     (("code", "lập trình", "lap trinh", "sửa lỗi", "sua loi", "bug", "hàm", "class",
-      "python", "script", "file", "thư mục", "thu muc", "git", "commit", "cài package",
+      "python", "pygame", "game", "app", "script", "file", "thư mục", "thu muc", "git", "commit", "cài package",
       "cai package", "pip", "terminal", "lệnh", "lenh bash"), "lap-trinh"),
     (("tìm", "tim kiem", "tìm kiếm", "web", "tin tức", "tin tuc", "giá", "gia ",
       "github", "đọc trang", "doc trang", "xem video", "youtube xem",
@@ -59,7 +59,8 @@ _ROUTE_KW = [
       "macro", "ghi lại", "phát lại", "thao tác", "thao tac",
       "điều khiển máy", "dieu khien may"), "desktop"),
     (("video", "ảnh", "anh ai", "giọng", "giong noi", "giọng nói", "nói", "mp3",
-      "tts", "nhạc", "nhac", "cắt ghép", "slideshow", "shorts"), "media"),
+      "tts", "đọc thành tiếng", "thành tiếng", "đọc văn bản", "chuyển văn bản",
+      "nhạc", "nhac", "cắt ghép", "slideshow", "shorts"), "media"),
     (("facebook", "đăng bài", "dang bai", "tiktok", "instagram", "twitter",
       "bình luận", "mạng xã hội", "theo dõi", "đăng youtube"), "mang-xa-hoi"),
     (("nhớ", "nho ", "ghi nhớ", "skill", "bài học", "bai hoc", "kinh nghiệm"), "ghi-nho"),
@@ -252,6 +253,8 @@ def _sys(manager, sid, cwd, user_text=""):
             "\nSỬ DỤNG LSP: Sau khi mở hoặc sửa file nguồn (.c/.cpp/.py), dùng lsp_diagnostics(file) "
             "để lấy lỗi/cảnh báo, lsp_definition/lsp_references/lsp_symbols/lsp_hover để phân tích mã. "
             "Trước khi chạy/biên dịch, luôn lsp_diagnostics để tự sửa lỗi tĩnh."
+            "\nREPO LẠ: gọi repo_map(root) 1 lần lấy bản đồ toàn repo (file + class/hàm) "
+            "trước khi đọc/sửa lung tung nhiều file.\n"
             "\nSỬ DỤNG SUBAGENT: Với nhiệm vụ tách biệt nặng (quét toàn repo, viết code độc lập, "
             "tra cứu song song), dùng task(description, prompt, type) — agent con chạy context riêng, "
             "chỉ trả tóm tắt về. type='explore' (mặc định, CHỈ ĐỌC) cho tìm hiểu; type='general' "

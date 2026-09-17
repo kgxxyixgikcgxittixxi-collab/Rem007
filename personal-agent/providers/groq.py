@@ -1244,6 +1244,10 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
     xoay sang model nhanh ngay thay vì treo 70s×5 như bản cũ."""
     body = {"messages": msgs, "max_tokens": 8192, "stream": True,
             "stream_options": {"include_usage": True}}
+    try:
+        _warn = _ctx_guard(msgs if isinstance(msgs, list) else [])
+    except Exception:
+        _warn = ""
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"

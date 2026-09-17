@@ -376,7 +376,7 @@ def test_day_features():
                 os.replace(bak, fp)
             except Exception:
                 pass
-    from extensions import Manager, ASK_USER_DEF
+    from extensions import Manager
     m = Manager(specs=[])
     check("ask_user ẩn khi chưa gắn", "ask_user" not in [t["function"]["name"] for t in m.schemas()])
     m.ask_user_handler = lambda a: "chọn 1"
@@ -391,6 +391,9 @@ def test_day_features():
     _pm._save_rules([r for r in _pm._load_rules() if r.get("pattern") != "_trem_xyz"])
     import repl
     check("slash /review", "/review" in repl._SLASH)
+    check("slash /plansave+/newtask", "/plansave" in repl._SLASH and "/newtask" in repl._SLASH)
+    check("label RepoMap", repl._TOOL_LABEL.get("repo_map") == "RepoMap")
+    check("perm repo_map allow", _pm.PermPolicy().policy("repo_map") == "allow")
     check("label Hỏi", repl._TOOL_LABEL.get("ask_user") == "Hỏi")
     check("perm ask_user", _pm.PermPolicy().policy("ask_user") in ("ask", "allow"))
     src = open("repl.py", encoding="utf-8").read()
