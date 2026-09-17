@@ -18,6 +18,9 @@ ALLOW = {
 ASK = {
     "bash", "bash_poll", "write_file", "edit_file", "apply_patch", "chdir",
     "web_fetch", "github_api", "ensure_tool", "pip_install", "task",
+    # web nặng: tải ảnh / tạo PDF (ghi file, tốn mạng)
+    "web_images", "web_download_image", "web_download_images",
+    "make_pdf",
     # ghi nhớ / học (đổi trạng thái) → hỏi ở safe mode
     "skill_save", "exp_lesson_save", "exp_skill_save",
     # điều khiển desktop

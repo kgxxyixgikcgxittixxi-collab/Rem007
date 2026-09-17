@@ -88,6 +88,19 @@ if ! "$PY" -c "import gtts" >/dev/null 2>&1; then
     _pip "gTTS>=2.3" || true
 fi
 
+# ── 2d. Giọng nói (voice_*): STT online + mic. Thiếu thì /voice báo rõ, không crash.
+echo "[i] Cài voice STT/mic (SpeechRecognition + sounddevice)..."
+if ! "$PY" -c "import speech_recognition" >/dev/null 2>&1; then
+    _pip "SpeechRecognition>=3.10" || echo "[!] SpeechRecognition chưa cài được — voice_cmd/voice_listen sẽ không dùng được."
+fi
+if ! "$PY" -c "import sounddevice" >/dev/null 2>&1; then
+    # portaudio là gốc rễ để build/pip sounddevice/PyAudio trên PC
+    if [ -z "$PREFIX" ]; then
+        apt-get install -y portaudio19-dev 2>/dev/null || true
+    fi
+    _pip "sounddevice>=0.4" || echo "[!] sounddevice chưa cài được — mic có thể không dùng được."
+fi
+
 # ── 3. Thiết lập keys.sqlite + thư mục ──────────────────────────────────
 DIR="$HOME/.rem_ai"
 mkdir -p "$DIR"

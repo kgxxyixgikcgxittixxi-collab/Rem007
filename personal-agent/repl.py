@@ -193,14 +193,26 @@ P_AGENT = "\033[1m\033[96m❯\033[0m "       # kiểu opencode: dấu ❯ nổi 
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
 
-# ── Theme engine (đồng bộ dict C[] với config.THEMES[config.REPL_THEME]) ──
+# ── Theme engine: MỘT hệ duy nhất là themes.py (tui.json, kiểu opencode).
+# Theme cũ (config.THEMES/rem_theme: default/ocean/sunset/mono) được migrate
+# 1 lần sang tui.json rồi bỏ — tránh 2 hệ cùng vá dict C[] giẫm nhau.
 _THEMES_PATH = os.path.join(config.DIR, "rem_theme")
 def _apply_theme_c():
-    theme = getattr(config, "REPL_THEME", "default") or "default"
-    C.update(config.THEMES.get(theme, config.THEMES.get("default", {})))
     try:
-        with open(_THEMES_PATH, "w", encoding="utf-8") as f:
-            f.write(theme)
+        if os.path.isfile(_THEMES_PATH) and not themes.load_tui().get("theme"):
+            old = open(_THEMES_PATH, encoding="utf-8").read().strip()
+            if old in themes.list_themes():
+                themes.save_tui({"theme": old})
+            try:
+                os.remove(_THEMES_PATH)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        _patch = themes.apply()
+        if isinstance(_patch, dict):
+            C.update(_patch)
     except Exception:
         pass
 def _init_history():
@@ -631,6 +643,10 @@ _SLASH_CAT = {
     "/exit":         ("Cơ bản", "Thoát", "", ("/quit",)),
 }
 _SLASH = [cmd for cmd in _SLASH_CAT]
+# Kèm alias để autocomplete/gợi ý/so khớp lệnh `/...` cũng trúng
+# (vd /quit, /themes, /ls, /todo, /m, /summarize).
+_SLASH += [a for _c in _SLASH_CAT.values() for a in _c[3]
+           if isinstance(a, str) and a.startswith("/") and a not in _SLASH]
 # autocomplete: gõ dở khớp bất kỳ phần nào của lệnh (fuzzy kiểu palette)
 def _palette_suggest(frag):
     frag = frag.lower().lstrip("/")
@@ -1699,30 +1715,37 @@ class Repl:
         if n.isdigit() and 1 <= int(n) <= len(matches):
             self.slash(matches[int(n) - 1])
 
-    # ── /theme: đổi bảng màu giao diện (lưu vào config.REPL_THEME) ──
+    # ── /theme: đổi bảng màu giao diện (lưu vào tui.json, kiểu opencode) ──
     def _theme(self, name):
-        import config as _cfg
-        try:
-            _cfg.REPL_THEME
-        except AttributeError:
-            _p("Không đọc được REPL_THEME (bản cũ config?)", "rd")
-            return
+        name = (name or "").strip()
         if not name:
-            cur = _cfg.REPL_THEME
-            _p(f"Màu hiện tại: '{cur}'", "cy")
-            _p("Chọn: " + " · ".join(f"{C['cy']}{t}{C['reset']}" for t in _cfg.THEMES), "dim")
-            _p("Cách dùng: /theme <tên>   (vd /theme ocean)", "dim")
-            return
-        if name not in _cfg.THEMES:
-            _p(f"Không có theme '{name}'. Có: {', '.join(_cfg.THEMES)}", "ye")
+            try:
+                names = themes.list_themes()
+                cur = themes.current_theme()
+            except Exception:
+                _p("[LOI] không đọc được danh sách theme", "rd")
+                return
+            for n in names:
+                mark = "*" if n == cur else " "
+                _p(f"{mark} {n}", "cy" if n == cur else "dim")
+            _p("Cách dùng: /theme <tên>   (vd /theme tokyonight)", "dim")
             return
         try:
-            _cfg.REPL_THEME = name
-            _apply_theme_c()
+            if name not in themes.list_themes():
+                _p(f"Không có theme '{name}'. Có: {', '.join(themes.list_themes())}", "ye")
+                return
+            if themes.save_tui({"theme": name}):
+                try:
+                    _patch = themes.apply(name)
+                    if isinstance(_patch, dict):
+                        C.update(_patch)
+                except Exception:
+                    pass
+                _p(f"Đã chuyển theme → {name}.", "gr")
+            else:
+                _p(f"[LOI] không lưu được theme '{name}'", "rd")
         except Exception as e:
-            _p(f"[LOI] đổi theme: {e}", "rd")
-            return
-        _p(f"Đã đổi sang theme '{name}'.", "gr")
+            _p(f"[LOI] theme: {type(e).__name__}: {e}", "rd")
 
     # ── /todos: danh sách công việc kiểu opencode todo list ──
     def _todos(self):
@@ -2710,29 +2733,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     _p("(editor trống — không gửi)", "dim")
             except Exception as e:
                 _p(f"[LOI] editor: {type(e).__name__}: {e}", "rd")
-        elif cmd == "/themes" or cmd.startswith("/themes ") or cmd == "/theme" or cmd.startswith("/theme "):
-            try:
-                _arg = parts[1] if len(parts) > 1 else ""
-                if not _arg:
-                    names = themes.list_themes()
-                    cur = themes.current_theme()
-                    for n in names:
-                        mark = "*" if n == cur else " "
-                        _p(f"{mark} {n}", "cy" if n == cur else "dim")
-                    _p("Gõ /theme <tên> để chuyển.", "dim")
-                else:
-                    if themes.save_tui({"theme": _arg}):
-                        try:
-                            _patch = themes.apply(_arg)
-                            if isinstance(_patch, dict):
-                                C.update(_patch)
-                        except Exception:
-                            pass
-                        _p(f"Đã chuyển theme → {_arg}", "gr")
-                    else:
-                        _p(f"[LOI] không lưu được theme '{_arg}'", "rd")
-            except Exception as e:
-                _p(f"[LOI] theme: {type(e).__name__}: {e}", "rd")
+        elif cmd == "/themes" or cmd.startswith("/themes "):
+            self._theme(parts[1] if len(parts) > 1 else "")
         elif cmd == "/share" or cmd.startswith("/share "):
             fp = self._export()
             # opencode copy link share vào clipboard — bản local copy đường dẫn
