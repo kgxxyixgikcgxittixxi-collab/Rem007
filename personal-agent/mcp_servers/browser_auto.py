@@ -169,8 +169,10 @@ def browser_click(selector, index=0):
 
 
 def browser_click_text(text, index=0):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         el = page.get_by_text(text, exact=False).nth(int(index))
         el.scroll_into_view_if_needed()
         el.click()
@@ -181,8 +183,10 @@ def browser_click_text(text, index=0):
 
 
 def browser_type(selector, text, clear=False):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         text = str(text or "")
         if len(text) > 4000:
             return "[LOI] text quá dài (>4000 ký tự) — chia nhỏ ra"
@@ -198,8 +202,10 @@ def browser_type(selector, text, clear=False):
 
 
 def browser_press(key, selector=None):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         if selector:
             page.locator(selector).first.press(key)
         else:
@@ -210,8 +216,10 @@ def browser_press(key, selector=None):
 
 
 def browser_screenshot(full=False, name=""):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         p = os.path.join(_OUT, time.strftime("%H%M%S") + (("_" + name) if name else "") + ".png")
         page.screenshot(path=p, full_page=bool(full))
         return p
@@ -220,8 +228,10 @@ def browser_screenshot(full=False, name=""):
 
 
 def browser_content(max_chars=8000, text=True):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         try:
             max_chars = max(200, min(int(max_chars or 8000), 60000))
         except Exception:
@@ -236,8 +246,10 @@ def browser_content(max_chars=8000, text=True):
 
 
 def browser_eval(js):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         out = page.evaluate(js) if not js.strip().startswith("(") else page.evaluate(js)
         return clamp(json.dumps(out, ensure_ascii=False, default=str), 8000) if not isinstance(out, str) else clamp(out, 8000)
     except Exception as e:
@@ -245,8 +257,10 @@ def browser_eval(js):
 
 
 def browser_wait(selector=None, timeout=15000, sleep=1.0):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         if selector:
             try:
                 timeout = max(500, min(int(timeout or 15000), 30000))
@@ -265,8 +279,10 @@ def browser_wait(selector=None, timeout=15000, sleep=1.0):
 
 
 def browser_scroll(direction="down", amount=600):
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
     try:
-        page = _ensure()
         sign = 1 if direction in ("down", "bottom") else -1
         page.evaluate(f"window.scrollBy(0, {sign * int(amount)})")
         page.wait_for_timeout(300)
@@ -323,6 +339,136 @@ def browser_back():
         return f"[LOI] {type(e).__name__}: {e}"
 
 
+def browser_snapshot(max_items=60, a=None):
+    """LIỆT KÊ phần tử tương tác trên trang (như dl_tree cho web): nút/link/ô nhập kèm selector gợi ý.
+    Gọi sau browser_open để chọn selector CHUẨN, đỡ đoán mò."""
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
+    try:
+        try:
+            max_items = max(10, min(int(max_items or 60), 150))
+        except Exception:
+            max_items = 60
+        js = """() => {
+          const out = [];
+          const els = document.querySelectorAll('a,button,input,select,textarea,[role=button],[onclick]');
+          for (const el of els) {
+            if (out.length >= 150) break;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) continue;
+            const tag = (el.tagName || '?').toLowerCase();
+            const txt = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().replace(/\\s+/g,' ').slice(0,60);
+            let sel = tag;
+            if (el.id) sel += '#' + el.id;
+            else if (el.name) sel += `[name=${el.name}]`;
+            else if (el.className && typeof el.className === 'string') {
+              const c = el.className.trim().split(/\\s+/)[0];
+              if (c) sel += '.' + c;
+            }
+            const typ = el.getAttribute('type') || '';
+            out.push(`${tag}${typ ? '['+typ+']' : ''} | ${txt || '(no text)'} | ${sel}`);
+          }
+          return out;
+        }"""
+        items = page.evaluate(js) or []
+        items = items[:max_items]
+        if not items:
+            return "(trang không có phần tử tương tác nào)"
+        head = f"Trang {page.url} — {len(items)} phần tử (dùng selector cột cuối cho browser_click/browser_type):"
+        return head + "\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(items))
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+
+
+def browser_fill_login(user_selector="", pass_selector="", username="", password="", submit_selector="", a=None):
+    """ĐĂNG NHẬP 1 PHÁT: điền user+pass rồi bấm submit. Giảm 3-4 tool còn 1, nghe lời hơn."""
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
+    if not user_selector or not pass_selector:
+        return "[LOI] cần user_selector + pass_selector (lấy từ browser_snapshot). vd input[name=email], input[type=password]"
+    try:
+        page.locator(user_selector).first.scroll_into_view_if_needed()
+        page.locator(user_selector).first.click()
+        page.locator(user_selector).first.fill("")
+        page.locator(user_selector).first.type(str(username or ""), delay=20)
+        page.locator(pass_selector).first.click()
+        page.locator(pass_selector).first.fill("")
+        page.locator(pass_selector).first.type(str(password or ""), delay=20)
+        if submit_selector:
+            try:
+                page.locator(submit_selector).first.scroll_into_view_if_needed()
+                page.locator(submit_selector).first.click()
+            except Exception:
+                page.keyboard.press("Enter")
+        else:
+            page.keyboard.press("Enter")
+        page.wait_for_timeout(2000)
+        title = page.title() or ""
+        return f"Đã điền + submit login. URL: {page.url}\nTiêu đề: {title}"
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+
+
+def browser_tabs(action="list", index=0, url="", a=None):
+    """QUẢN LÝ TAB: list/new/switch/close. action=list|new|switch|close."""
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
+    try:
+        ctx = page.context
+        tabs = list(ctx.pages)
+        act = (action or "list").strip().lower()
+        if act == "list":
+            lines = [f"{i}. { (p.url or '(trống)')[:100]}" for i, p in enumerate(tabs)]
+            return f"Đang có {len(tabs)} tab (tab hiện tại: {page.url}):\n" + "\n".join(lines)
+        if act == "new":
+            np = ctx.new_page()
+            if url:
+                np.goto(url, wait_until="domcontentloaded")
+            global _PAGE
+            _PAGE = np
+            return f"Đã mở tab mới: {np.url}"
+        if act == "switch":
+            i = max(0, min(int(index or 0), len(tabs) - 1))
+            _PAGE = tabs[i]
+            try:
+                _PAGE.bring_to_front()
+            except Exception:
+                pass
+            return f"Đã chuyển sang tab {i}: {_PAGE.url}"
+        if act == "close":
+            i = max(0, min(int(index or 0), len(tabs) - 1))
+            if len(tabs) <= 1:
+                return "[LOI] chỉ còn 1 tab — dùng browser_close để đóng trình duyệt"
+            tabs[i].close()
+            if tabs[i] == page:
+                _PAGE = ctx.pages[0] if ctx.pages else None
+            return f"Đã đóng tab {i}."
+        return "[LOI] action phải là list|new|switch|close"
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+
+
+def browser_wait_text(text="", timeout=15, a=None):
+    """CHỜ chữ xuất hiện trên trang (tới 30s): thay vì sleep mù."""
+    page = _need_page()
+    if page is None:
+        return _ERR or "[LOI] trình duyệt chưa sẵn sàng"
+    if not (text or "").strip():
+        return "[LOI] cần text cần chờ"
+    try:
+        timeout = max(2, min(int(timeout or 15), 30))
+    except Exception:
+        timeout = 15
+    try:
+        page.get_by_text(text, exact=False).first.wait_for(timeout=timeout * 1000)
+        return f"Thấy chữ '{text}' trên {page.url}."
+    except Exception:
+        return f"[LOI] chờ {timeout}s vẫn chưa thấy '{text}' trên {page.url}."
+
+
 def browser_close():
     global _BROWSER, _PAGE
     try:
@@ -369,6 +515,18 @@ TOOLS = [
                  "amount": {"type": "integer", "description": "số px, mặc định 600"}}), browser_scroll),
     Tool("browser_search", "Tìm kiếm web bằng Bing và trả về danh sách kết quả.",
          schema({"q": {"type": "string"}, "n": {"type": "integer", "description": "số kết quả, mặc định 5"}}), browser_search),
+    Tool("browser_snapshot", "LIỆT KÊ nút/link/ô nhập trên trang kèm selector gợi ý (như dl_tree cho web). Gọi sau browser_open để chọn selector CHUẨN.",
+         schema({"max_items": {"type": "integer", "default": 60}}), browser_snapshot),
+    Tool("browser_fill_login", "ĐĂNG NHẬP 1 PHÁT: điền user+pass rồi submit (lấy selector từ browser_snapshot).",
+         schema({"user_selector": {"type": "string"}, "pass_selector": {"type": "string"},
+                 "username": {"type": "string"}, "password": {"type": "string"},
+                 "submit_selector": {"type": "string", "description": "tuỳ chọn, rỗng = nhấn Enter"}}), browser_fill_login),
+    Tool("browser_tabs", "QUẢN LÝ TAB: list/new/switch/close.",
+         schema({"action": {"type": "string", "description": "list|new|switch|close", "default": "list"},
+                 "index": {"type": "integer", "default": 0},
+                 "url": {"type": "string", "default": ""}}), browser_tabs),
+    Tool("browser_wait_text", "CHỜ chữ xuất hiện trên trang (tới 30s).",
+         schema({"text": {"type": "string"}, "timeout": {"type": "integer", "default": 15}}), browser_wait_text),
     Tool("browser_back", "Quay lại trang trước trong lịch sử.",
          schema({}), browser_back),
     Tool("browser_close", "Đóng trình duyệt, giải phóng tài nguyên.",

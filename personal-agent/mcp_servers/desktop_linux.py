@@ -117,16 +117,26 @@ def _run(cmd, timeout=30):
 def dl_status(a=None):
     at = _at()
     xd = _xd()
+    wm = shutil.which("wmctrl")
+    clip = shutil.which("xclip") or shutil.which("xsel")
+    shot = shutil.which("scrot") or shutil.which("gnome-screenshot") or shutil.which("import")
+    wt = shutil.which("wtype") or shutil.which("ydotool")
     rows = [
         ("pyatspi", "có" if at else "thiếu — apt install python3-pyatspi at-spi2-core"),
         ("xdotool", "có" if xd else "thiếu — apt install xdotool (chỉ input X11)"),
+        ("wmctrl", "có" if wm else "thiếu — apt install wmctrl (focus/liệt kê cửa sổ)"),
+        ("clipboard", "có" if clip else "thiếu — apt install xclip"),
+        ("screenshot", "có" if shot else "thiếu — apt install scrot"),
     ]
     try:
         subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "toolkit-accessibility"],
                        capture_output=True, text=True, timeout=10)
     except Exception:
         pass
-    return "Môi trường điều khiển desktop Linux:\n" + "\n".join(f"- {k}: {v}" for k, v in rows)
+    sess = os.environ.get("XDG_SESSION_TYPE", "?") + "/" + (os.environ.get("DISPLAY") or "?")
+    tip = "" if xd else " (Wayland? thử wtype/ydotool — hiện chỉ hỗ trợ đầy đủ trên X11)"
+    extra = f"\n- wayland-input: {wt or 'thiếu'}{tip}\n- session: {sess}"
+    return "Môi trường điều khiển desktop Linux:\n" + "\n".join(f"- {k}: {v}" for k, v in rows) + extra
 
 
 def _desktop():
@@ -240,6 +250,18 @@ def dl_click(ref="", name="", role="", a=None):
     if ref:
         obj = _resolve(ref)
         info = f"ref {ref}"
+        # ref hết hạn (snapshot cũ) → thử tìm lại bằng name/role đi kèm nếu có
+        if obj is None and (name or role):
+            desk = _desktop()
+            if desk is not None:
+                target = (name or "").lower()
+                rrole = (role or "").lower()
+                for appobj in desk:
+                    hit = _find_named(appobj, target, rrole)
+                    if hit is not None:
+                        obj = hit
+                        break
+                info = f"ref {ref} (hết hạn, đã thử lại name='{name}' role='{role}')"
     elif name or role:
         desk = _desktop()
         if desk is None:
@@ -253,7 +275,7 @@ def dl_click(ref="", name="", role="", a=None):
                 break
         info = f"name='{name}' role='{role}'"
     if obj is None:
-        return f"[LOI] không tìm thấy {info}. Snapshot lại rồi thử ref at#id."
+        return f"[LOI] không tìm thấy {info}. Gọi dl_tree/dl_find để snapshot lại rồi thử ref mới (ref cũ chỉ sống ~10 phút)."
 
     # 1) AT-SPI action (không cần chuột thật)
     try:
@@ -277,7 +299,10 @@ def dl_click(ref="", name="", role="", a=None):
 def _find_named(o, name, role, _depth=0):
     if _depth > 14:
         return None
-    if _obj_name(o).lower() == name and (not role or _obj_role(o).lower() == role):
+    nm = (name or "").lower().strip()
+    on = _obj_name(o).lower()
+    ro = _obj_role(o).lower()
+    if nm and (on == nm or nm in on) and (not role or ro == role.lower() or role.lower() in ro):
         return o
     try:
         for ch in o:
@@ -354,6 +379,165 @@ def dl_clipboard(copy="", a=None):
     except Exception as e:
         return f"[LOI] {type(e).__name__}: {e}"
     return (rr.stdout or "(rỗng)").strip()[:1000] if rr.returncode == 0 else "[LOI] đọc clipboard"
+
+
+_APP_ALIASES = {
+    "terminal": ["gnome-terminal", "x-terminal-emulator", "xterm", "konsole"],
+    "files": ["nautilus", "nemo", "thunar", "dolphin"],
+    "firefox": ["firefox"], "chrome": ["google-chrome", "chromium", "chromium-browser"],
+    "browser": ["xdg-open"], "vscode": ["code", "codium"], "code": ["code", "codium"],
+    "nhạc": ["rhythmbox", "vlc", "spotify"], "nhac": ["rhythmbox", "vlc"],
+    "phim": ["vlc", "totem"], "video": ["vlc", "totem"],
+}
+
+
+@_recorded("dl_open")
+def dl_open(app="", url="", a=None):
+    """MỞ APP hoặc URL: app='Terminal'/'Firefox'/'Files'/tên lệnh; url='https://...' mở bằng trình duyệt mặc định.
+    Nghe lời tuyệt đối — gọi 1 phát là mở, không cần dl_tree trước."""
+    app = (app or "").strip()
+    url = (url or "").strip()
+    if url:
+        try:
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return f"OK: đã mở URL {url}."
+        except Exception as e:
+            return f"[LOI] không mở được URL: {e}"
+    if not app:
+        return "[LOI] cần app (vd Terminal/Firefox/Files) hoặc url"
+    key = app.lower()
+    cands = list(_APP_ALIASES.get(key, [])) + [app, app.lower(), app.lower().replace(" ", "-")]
+    # thử gtk-launch (tên .desktop) trước, rồi lệnh trực tiếp
+    for c in cands:
+        if shutil.which(c):
+            try:
+                subprocess.Popen([c], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                return f"OK: đã mở {app} ({c})."
+            except Exception:
+                continue
+        try:
+            subprocess.Popen(["gtk-launch", c], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return f"OK: đã mở {app} (gtk-launch {c})."
+        except Exception:
+            continue
+    # fallback cuối: xdg-open với tên (một số DE tự phân giải)
+    try:
+        subprocess.Popen(["xdg-open", app], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return f"OK: đã thử mở {app} bằng xdg-open."
+    except Exception as e:
+        return f"[LOI] không tìm thấy app '{app}'. Thử dl_apps để xem app đang mở, hoặc cài app trước."
+
+
+@_recorded("dl_focus")
+def dl_focus(title="", a=None):
+    """FOCUS 1 cửa sổ đang mở theo tên (vd 'Terminal', 'Firefox'). Dùng khi nhiều cửa sổ chồng nhau."""
+    title = (title or "").strip()
+    if not title:
+        return "[LOI] cần title (1 phần tên cửa sổ, vd Terminal)"
+    wm = shutil.which("wmctrl")
+    if wm:
+        try:
+            rr = subprocess.run([wm, "-l"], capture_output=True, text=True, timeout=10)
+            wins = (rr.stdout or "").strip().splitlines()
+            hit = next((l for l in wins if title.lower() in l.lower()), "")
+            if not hit:
+                return f"[LOI] không thấy cửa sổ chứa '{title}'. Mở bằng dl_open trước. Đang có {len(wins)} cửa sổ."
+            wid = hit.split()[0]
+            subprocess.run([wm, "-i", "-a", wid], timeout=10)
+            subprocess.run([wm, "-i", "-r", wid, "-b", "add,above"], timeout=10)
+            subprocess.run([wm, "-i", "-r", wid, "-b", "remove,above"], timeout=10)
+            return f"OK: đã focus cửa sổ '{hit.strip()[:100]}'."
+        except Exception as e:
+            return f"[LOI] {type(e).__name__}: {e}"
+    # fallback xdotool
+    if _xd():
+        ok, _ = _run(["search", "--onlyvisible", "--name", title, "windowactivate"])
+        return f"OK: đã focus '{title}'." if ok else f"[LOI] không thấy cửa sổ '{title}'."
+    return "[LOI] thiếu wmctrl/xdotool — cài: apt install wmctrl xdotool"
+
+
+def dl_wait(query="", app="", timeout=15, a=None):
+    """CHỜ 1 phần tử xuất hiện (thay vì gọi dl_tree lặp tay): poll mỗi 1s tới timeout.
+    query: tên/nút cần chờ (vd 'Save', 'Đăng nhập'). Trả ref at<id> khi thấy."""
+    try:
+        timeout = max(2, min(int(timeout or 15), 60))
+    except Exception:
+        timeout = 15
+    q = (query or "").lower().strip()
+    if not q:
+        return "[LOI] cần query (tên phần tử cần chờ)"
+    desk = _desktop()
+    if desk is None:
+        return "[LOI] không truy cập được AT-SPI"
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        with _lock:
+            _snap["map"] = {}
+        results = []
+
+        def _search(o, depth):
+            if len(results) >= 5 or depth > 10:
+                return
+            nm = _obj_name(o).lower()
+            if q in nm and nm:
+                n = len(results)
+                ref = f"at{n}"
+                _snap["map"][ref] = {"obj": o, "role": _obj_role(o), "name": _obj_name(o)}
+                results.append(f"[{ref}] {_obj_role(o)} '{_obj_name(o)}'")
+            try:
+                for ch in o:
+                    _search(ch, depth + 1)
+            except Exception:
+                pass
+
+        try:
+            for appobj in desk:
+                if app and _obj_name(appobj).lower() != app.lower():
+                    continue
+                _search(appobj, 0)
+        except Exception:
+            pass
+        if results:
+            return f"Thấy '{query}' sau {time.time()-t0:.1f}s:\n" + "\n".join(results) + "\nDùng ref để dl_click."
+        time.sleep(1.0)
+    return f"[LOI] chờ {timeout}s vẫn chưa thấy '{query}'. Thử dl_tree để xem màn hình hiện tại."
+
+
+def dl_screenshot(name="", a=None):
+    """CHỤP MÀN HÌNH desktop → trả đường dẫn PNG (cho model vision kiểm tra lại sau khi click/gõ)."""
+    outdir = os.path.join(DIR, "shots")
+    os.makedirs(outdir, exist_ok=True)
+    fn = (name or "desk").strip().replace(" ", "_")[:40] or "desk"
+    path = os.path.join(outdir, time.strftime("%H%M%S") + f"_{fn}.png")
+    scrot = shutil.which("scrot")
+    if scrot:
+        try:
+            rr = subprocess.run([scrot, path], capture_output=True, text=True, timeout=15)
+            if rr.returncode == 0 and os.path.isfile(path):
+                return path
+        except Exception:
+            pass
+    gs = shutil.which("gnome-screenshot")
+    if gs:
+        try:
+            rr = subprocess.run([gs, "-f", path], capture_output=True, text=True, timeout=15)
+            if rr.returncode == 0 and os.path.isfile(path):
+                return path
+        except Exception:
+            pass
+    imp = shutil.which("import")
+    if imp:
+        try:
+            rr = subprocess.run([imp, "-window", "root", path], capture_output=True, text=True, timeout=15)
+            if rr.returncode == 0 and os.path.isfile(path):
+                return path
+        except Exception:
+            pass
+    return "[LOI] không chụp được (cài scrot: apt install scrot)"
 
 
 def _obj_state(o):
@@ -675,7 +859,8 @@ def rec_play(name="", speed=1.0, a=None):
 
 
 _REC_FN = {"dl_click": dl_click, "dl_type": dl_type, "dl_key": dl_key,
-           "dl_mouse": dl_mouse, "dl_clipboard": dl_clipboard}
+           "dl_mouse": dl_mouse, "dl_clipboard": dl_clipboard,
+           "dl_open": dl_open, "dl_focus": dl_focus}
 
 
 TOOLS = [
@@ -719,6 +904,21 @@ TOOLS = [
     Tool("dl_clipboard", "ĐỌC/GHI clipboard (cần xclip/xsel).",
          schema({"copy": {"type": "string", "default": ""}}),
          dl_clipboard),
+    Tool("dl_open", "MỞ APP/URL: mở app desktop (Terminal/Firefox/Files/VSCode...) hoặc URL. Gọi 1 phát là mở.",
+         schema({"app": {"type": "string", "description": "tên app (vd Terminal, Firefox, Files)", "default": ""},
+                 "url": {"type": "string", "description": "URL cần mở (tuỳ chọn)", "default": ""}}),
+         dl_open),
+    Tool("dl_focus", "FOCUS cửa sổ đang mở theo tên (vd Terminal, Firefox). Dùng khi nhiều cửa sổ.",
+         schema({"title": {"type": "string", "description": "1 phần tên cửa sổ"}}),
+         dl_focus),
+    Tool("dl_wait", "CHỜ phần tử xuất hiện (tới 60s): poll mỗi 1s, trả ref khi thấy. Thay vì dl_tree lặp tay.",
+         schema({"query": {"type": "string", "description": "tên/nút cần chờ"},
+                 "app": {"type": "string", "default": ""},
+                 "timeout": {"type": "integer", "default": 15}}),
+         dl_wait),
+    Tool("dl_screenshot", "CHỤP MÀN HÌNH desktop → trả đường dẫn PNG (vision kiểm tra lại).",
+         schema({"name": {"type": "string", "default": ""}}),
+         dl_screenshot),
     Tool("rec_start", "BẮT ĐẦU GHI macro: mọi thao tác dl_* sau đó được ghi lại theo mục công việc. "
          "Xong gọi rec_stop để lưu. Lần sau rec_play là AI làm lại.",
          schema({"name": {"type": "string", "description": "tên macro (vd mo_nhac)"},

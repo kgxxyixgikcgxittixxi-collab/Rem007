@@ -178,6 +178,153 @@ def test_rec_stop_empty():
         check("rec_stop hồi quy", False, f"{type(e).__name__}: {e}")
 
 
+def test_opencode_parity():
+    print("[8] parity opencode: lệnh/titles/fork/undo-git/custom/task-type")
+    import repl
+    import sessions
+    for c in ("/connect", "/thinking", "/q", "/continue", "/rename", "/fork"):
+        check(f"slash {c}", c in repl._SLASH)
+    check("slash /keybinds", "/keybinds" in repl._SLASH)
+    src = open("repl.py", encoding="utf-8").read()
+    check("Tab vẽ lại cùng dòng (không \\n riêng)",
+          '_redraw_input_locked(self)' in src and '"\\n")' not in src.split('ch == "\\t"')[1].split("if o < 32")[0] if 'ch == "\\t"' in src else False)
+    check("prompt có pill agent", "[build]" in src and "[plan]" in src)
+    check("history ↑/↓", "_hist_push" in src and '"[A"' in src and '"[B"' in src)
+    check("@agent mentions", repl._AGENT_MENTIONS >= {"explore", "general", "plan", "build"})
+    src = open("repl.py", encoding="utf-8").read()
+    check("custom override builtin trước", "_cmds0" in src)
+    check("/q thoát", '"/q"' in src and "/exit" in src)
+    # session title/rename/fork (sid tạm, dọn sau)
+    sid = sessions.new()
+    try:
+        sessions.append(sid, {"role": "user", "content": "làm web bán cà phê rang xay"})
+        check("auto-title từ tin đầu", "cà phê" in sessions.get_title(sid), sessions.get_title(sid)[:50])
+        check("rename", sessions.set_title(sid, "Shop Cafe") and sessions.get_title(sid) == "Shop Cafe")
+        nid = sessions.fork(sid)
+        check("fork giữ lịch sử", nid and sessions.load(nid) == sessions.load(sid))
+        for f in (sessions._f(sid), sessions._f(nid)) if nid else (sessions._f(sid),):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    except Exception as e:
+        check("session title/fork", False, f"{type(e).__name__}: {e}")
+    # task tool có type explore|general
+    try:
+        from extensions import TASK_DEF
+        props = TASK_DEF["parameters"]["properties"]
+        check("task có type", "type" in props and "general" in str(props["type"]))
+    except Exception as e:
+        check("task có type", False, str(e))
+    # custom command parse model/subtask (file tạm, dọn sau)
+    try:
+        import tempfile
+        d = os.path.join(os.path.expanduser("~"), ".rem_ai", "commands")
+        os.makedirs(d, exist_ok=True)
+        fp = os.path.join(d, "_trem_test_.md")
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write("---\ndescription: test\nagent: general\nmodel: m/x\nsubtask: true\n---\nLàm $ARGUMENTS\n")
+        cmds = repl._load_custom_commands()
+        c = cmds.get("_trem_test_", {})
+        check("custom model", c.get("model") == "m/x", str(c.get("model")))
+        check("custom subtask", c.get("subtask") is True)
+        os.remove(fp)
+    except Exception as e:
+        check("custom model/subtask", False, f"{type(e).__name__}: {e}")
+    # groq favorite round-trip (giữ lại giá trị cũ)
+    try:
+        from providers import groq as _g
+        old = _g.get_favorite()
+        check("favorite set/get", _g.set_favorite("openai/gpt-oss-20b") and _g.get_favorite() == "openai/gpt-oss-20b")
+        if old:
+            _g.set_favorite(old)
+        else:
+            try:
+                os.remove(_g._MODEL_FILE)
+            except Exception:
+                pass
+    except Exception as e:
+        check("favorite set/get", False, f"{type(e).__name__}: {e}")
+    # undo/redo file trên repo tạm (không đụng repo thật)
+    try:
+        import subprocess, tempfile as _tf
+        td = _tf.mkdtemp(prefix="remtmt")
+        subprocess.run(["git", "init", "-q", td], check=True, timeout=15)
+        subprocess.run(["git", "-C", td, "config", "user.email", "t@t"], check=True, timeout=10)
+        subprocess.run(["git", "-C", td, "config", "user.name", "t"], check=True, timeout=10)
+        with open(os.path.join(td, "a.txt"), "w") as f:
+            f.write("v1\n")
+        subprocess.run(["git", "-C", td, "add", "."], check=True, timeout=10)
+        subprocess.run(["git", "-C", td, "commit", "-qm0"], check=True, timeout=10)
+        sid2 = sessions.new()
+        check("work snapshot", sessions.work_snapshot(sid2, cwd=td) is True)
+        with open(os.path.join(td, "a.txt"), "w") as f:
+            f.write("v2\n")
+        rf, _m = sessions.work_undo(sid2, cwd=td)
+        check("work undo revert", open(os.path.join(td, "a.txt")).read() == "v1\n", str(rf))
+        ok, _m2 = sessions.work_redo(sid2)
+        check("work redo apply", ok and open(os.path.join(td, "a.txt")).read() == "v2\n", str(_m2))
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+        for f in (sessions._f(sid2), sessions._work_f(sid2), sessions._work_redo_f(sid2)):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    except Exception as e:
+        check("work undo/redo", False, f"{type(e).__name__}: {e}")
+
+
+def test_context_hardening():
+    print("[9] context: trim giới hạn cứng + system giữ mọi turn")
+    import sessions
+    msgs = [{"role": "system", "content": "sys"}] + [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 5000}
+        for i in range(6)]
+    out = sessions.trim(msgs)
+    tot = sum(sessions._char_len(m) for m in out)
+    check("trim ngắn/dài vẫn ≤20000", tot <= 20000, f"(got {tot})")
+    check("trim giữ system đầu", out and out[0].get("role") == "system")
+    # system prompt không rơi ở turn>1 (mock chat_stream, 0 quota)
+    try:
+        import agentloop
+        from permissions import Presets
+        seen = []
+        calls = {"n": 0}
+
+        def fake(msgs, tools=None, budget=None, on_delta=None, cancel=None):
+            seen.append([m.get("role") for m in msgs])
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"content": "", "tool_calls": [
+                    {"id": "t1", "function": {"name": "cwd", "arguments": "{}"}}]}
+            return {"content": "xong", "tool_calls": []}
+
+        real = agentloop.groq.chat_stream
+        agentloop.groq.chat_stream = fake
+
+        class DummyMgr:
+            def schemas(self):
+                return []
+
+            def call(self, *a, **k):
+                return "toolres"
+
+        a = agentloop.Agent(DummyMgr(), Presets.build(), sid="sysregtest")
+        os_, ot = agentloop.MAX_STEPS, agentloop.MAX_TURNS
+        agentloop.MAX_STEPS, agentloop.MAX_TURNS = 3, 3
+        try:
+            a.run("việc test hồi quy system")
+        finally:
+            agentloop.MAX_STEPS, agentloop.MAX_TURNS = os_, ot
+            agentloop.groq.chat_stream = real
+        check("≥2 lượt LLM", len(seen) >= 2, f"(got {len(seen)})")
+        check("mọi lượt đều system đầu",
+              bool(seen) and all(r and r[0] == "system" for r in seen))
+    except Exception as e:
+        check("system mọi turn", False, f"{type(e).__name__}: {e}")
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -196,6 +343,8 @@ def main():
         test_repl_helpers()
         test_overlay_and_fastpath()
         test_rec_stop_empty()
+        test_opencode_parity()
+        test_context_hardening()
         print(f"--> lượt {rnd}: {PASS} pass, {FAIL} fail")
         total_fail += FAIL
     print(f"TỔNG: {total_fail} fail sau {args.loop} lượt")

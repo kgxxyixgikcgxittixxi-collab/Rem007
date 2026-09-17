@@ -260,7 +260,45 @@ def resolve(prefs):
 
 
 def chat_models():
-    return resolve(MODEL_PREF_CHAT)
+    ordered = resolve(MODEL_PREF_CHAT)
+    # Model yêu thích (/models <số>, kiểu opencode favorite) luôn đứng đầu.
+    try:
+        fav = get_favorite()
+        if fav:
+            ordered = [fav] + [m for m in ordered if m != fav]
+    except Exception:
+        pass
+    return ordered
+
+
+_MODEL_FILE = os.path.join(DIR, "model.json")
+
+
+def get_favorite():
+    """Model chat user ghim (/models <số>). Rỗng nếu chưa ghim."""
+    try:
+        with open(_MODEL_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        m = str(d.get("chat_model") or "").strip()
+        return m
+    except Exception:
+        return ""
+
+
+def set_favorite(model):
+    """Ghim model chat (atomic). Trả True nếu lưu được."""
+    model = str(model or "").strip()
+    if not model:
+        return False
+    try:
+        os.makedirs(DIR, exist_ok=True)
+        tmp = _MODEL_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"chat_model": model}, f, ensure_ascii=False)
+        os.replace(tmp, _MODEL_FILE)
+        return True
+    except Exception:
+        return False
 
 
 def clone_models():

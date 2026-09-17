@@ -1,0 +1,18 @@
+# Voice (mic/STT + TTS tiếng Việt) cho Remtm
+# Cài: pip install -r requirements-voice.txt
+# Hệ thống (Debian/Ubuntu/X11): sudo apt install -y alsa-utils portaudio19-dev
+
+# STT online (Google vi-VN, không key) — khuyên cài
+SpeechRecognition>=3.10
+
+# Mic (đã có sẵn trên máy này, giữ lại để cài mới không thiếu)
+PyAudio>=0.2.13
+sounddevice>=0.4
+
+# TTS (đã có sẵn, giữ lại)
+edge-tts>=6.1
+gTTS>=2.3
+
+# STT offline — optional, bỏ comment nếu cần không mạng:
+# faster-whisper>=1.0
+# vosk>=0.3.45

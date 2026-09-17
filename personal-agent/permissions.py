@@ -13,6 +13,7 @@ ALLOW = {
     "browser_status", "browser_content",
     "media_status", "media_info",
     "social_report", "social_status",
+    "voice_status",
 }
 ASK = {
     "bash", "bash_poll", "write_file", "edit_file", "apply_patch", "chdir",
@@ -21,18 +22,22 @@ ASK = {
     "skill_save", "exp_lesson_save", "exp_skill_save",
     # điều khiển desktop
     "dl_click", "dl_type", "dl_key", "dl_mouse", "dl_clipboard",
+    "dl_open", "dl_focus", "dl_wait", "dl_screenshot",
     "rec_start", "rec_stop", "rec_play", "rec_delete",
     # trình duyệt
     "browser_open", "browser_navigate", "browser_click", "browser_click_text",
     "browser_type", "browser_press", "browser_screenshot", "browser_eval",
     "browser_wait", "browser_scroll", "browser_search", "browser_back",
-    "browser_close",
+    "browser_close", "browser_snapshot", "browser_fill_login",
+    "browser_tabs", "browser_wait_text",
     # media: tốn tài nguyên / ghi file
     "media_tts", "media_image", "media_scene", "media_slideshow",
     "media_concat", "media_trim", "media_scale", "media_to_gif",
     "media_overlay_text", "media_extract_audio",
     # mạng xã hội: đăng/tương tác
     "social_cycle", "social_post",
+    # giọng nói: thu mic / phát loa
+    "voice_listen", "voice_cmd", "voice_say",
 }
 DENY = set()
 

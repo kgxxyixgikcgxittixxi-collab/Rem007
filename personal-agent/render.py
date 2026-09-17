@@ -295,7 +295,23 @@ def md_to_ansi(text, tw=None):
         body = _inline(" ".join(para))
         ws = _wrap_ansi(body, tw)
         out.extend(ws or [""])
-    return "\n".join(out)
+    # Gọn: bỏ dòng chỉ có khoảng trắng/mã màu (hiện lên như "dòng trắng thừa"),
+    # gộp nhiều dòng trống liên tiếp thành tối đa 1, cắt trống đầu/cuối.
+    cleaned = []
+    blank = 0
+    for ln in out:
+        if not _ESC.sub("", ln).strip():
+            blank += 1
+            if blank <= 1:
+                cleaned.append("")
+            continue
+        blank = 0
+        cleaned.append(ln.rstrip())
+    while cleaned and not _ESC.sub("", cleaned[0]).strip():
+        cleaned.pop(0)
+    while cleaned and not _ESC.sub("", cleaned[-1]).strip():
+        cleaned.pop()
+    return "\n".join(cleaned)
 
 
 def diff_to_ansi(text, max_lines=40):

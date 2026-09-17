@@ -14,6 +14,7 @@ SPECS = [
     {"name": "desktop_linux", "module": "desktop_linux", "desc": "điều khiển desktop Linux qua AT-SPI (cây UI, click, gõ phím, chuột, clipboard) + macro recorder (ghi/phát lại thao tác theo mục việc)"},
     {"name": "browser_auto", "module": "browser_auto", "desc": "trình duyệt bằng Playwright: điều khiển web, YouTube, dashboard, screenshot"},
     {"name": "media_tools", "module": "media_tools", "desc": "làm video: TTS tiếng Việt, ảnh AI, ghép scene Shorts, cắt/nối/đổi cỡ (ffmpeg)"},
+    {"name": "voice", "module": "voice_server", "desc": "giọng nói tiếng Việt: mic/STT (voice_listen/voice_cmd), TTS ra loa (voice_say), kiểm tra mic/loa (voice_status)"},
     {"name": "social_auto", "module": "social_auto_server", "desc": "tự động hóa mạng xã hội 24/7 (Facebook, YouTube, TikTok, Instagram, Twitter)"},
 ]
 
@@ -57,18 +58,22 @@ def _external_specs():
     return specs
 
 
-# Tool subagent tích hợp (không cần MCP server riêng): agent con CHỈ ĐỌC.
+# Tool subagent tích hợp (không cần MCP server riêng): explore CHỈ ĐỌC,
+# general full quyền (trừ todo) — kiểu opencode.
 TASK_DEF = {
     "name": "task",
-    "description": ("SUBAGENT (kiểu Explore): giao việc tách biệt nặng (quét repo, "
-                    "tìm hiểu code, tra cứu song song) cho agent con chạy trong "
-                    "context riêng, chỉ trả TÓM TẮT về. Agent con CHỈ ĐỌC — không "
-                    "ghi file/sửa code/chạy shell. Không lồng quá 1 tầng."),
+    "description": ("SUBAGENT: giao việc tách biệt cho agent con chạy trong context "
+                    "riêng, chỉ trả TÓM TẮT về (không ngập context chính). "
+                    "type=explore (mặc định): CHỈ ĐỌC — quét repo/tìm hiểu code, không "
+                    "ghi file/sửa code/chạy shell. type=general: full tool (trừ todo) — "
+                    "làm nhiều bước, được sửa file/chạy lệnh. Không lồng quá 1 tầng. "
+                    "@explore/@general trong chat cũng gọi đường này."),
     "parameters": {
         "type": "object",
         "properties": {
             "description": {"type": "string", "description": "mô tả ngắn việc (3-5 từ)"},
             "prompt": {"type": "string", "description": "chỉ đạo chi tiết + format kết quả cần trả"},
+            "type": {"type": "string", "description": "explore (chỉ đọc) | general (full, trừ todo)", "default": "explore"},
         },
         "required": ["prompt"],
     },
@@ -227,14 +232,18 @@ class Manager:
             return 0
 
     def _run_subagent(self, args, timeout=120):
-        """Chạy agent con: đọc-hiểu/tìm kiếm/tóm tắt việc tách biệt (CHỈ ĐỌC +
-        tìm kiếm, CẤM ghi file/sửa code/chạy shell/điều khiển máy)."""
+        """Chạy agent con trong context riêng, chỉ trả tóm tắt.
+        type=explore (mặc định): CHỈ ĐỌC. type=general: full tool trừ todo."""
         import threading as _th
         desc = ""
         prompt = ""
+        kind = "explore"
         if isinstance(args, dict):
             desc = str(args.get("description", "") or "")[:200]
             prompt = str(args.get("prompt", "") or "")[:4000]
+            kind = str(args.get("type", "") or "explore").strip().lower() or "explore"
+            if kind not in ("explore", "general"):
+                kind = "explore"
         if not prompt.strip():
             return "[LOI] task cần 'prompt' mô tả việc cho agent con"
         with self._task_lock:
@@ -250,27 +259,44 @@ class Manager:
             # agent con — nếu không overrides deny bên dưới bị ruleset đè,
             # agent con CHỈ ĐỌC sẽ lén có full quyền ghi/shell.
             perm.rules = []
-            for t in ("write_file", "edit_file", "apply_patch", "bash", "bash_poll",
-                      "chdir", "pip_install", "ensure_tool", "task",
-                      "dl_click", "dl_type", "dl_key", "dl_mouse", "dl_clipboard",
-                      "rec_start", "rec_stop", "rec_play", "rec_delete",
-                      "browser_open", "browser_navigate", "browser_click",
-                      "browser_click_text", "browser_type", "browser_press",
-                      "browser_eval", "browser_wait", "browser_scroll",
-                      "browser_search", "browser_back", "browser_close",
-                      "social_cycle", "social_post",
-                      "media_tts", "media_image", "media_scene", "media_slideshow",
-                      "media_concat", "media_trim", "media_scale", "media_to_gif",
-                      "media_overlay_text", "media_extract_audio"):
-                perm.overrides[t] = "deny"
+            if kind == "general":
+                # General kiểu opencode: full tool trừ todo + trừ gọi subagent
+                # lồng nhau + trừ voice (mic/loa của phiên chính).
+                for t in ("task", "todo_list", "todo_write",
+                          "voice_listen", "voice_cmd", "voice_say"):
+                    perm.overrides[t] = "deny"
+                _role = ("Bạn là agent con GENERAL: được dùng full tool để làm việc "
+                         "nhiều bước (đọc/ghi file, chạy lệnh, web...). Trừ: không gọi "
+                         "subagent khác, không đụng todo của phiên chính, không dùng mic/loa. ")
+            else:
+                for t in ("write_file", "edit_file", "apply_patch", "bash", "bash_poll",
+                          "chdir", "pip_install", "ensure_tool", "task",
+                          "dl_click", "dl_type", "dl_key", "dl_mouse", "dl_clipboard",
+                          "dl_open", "dl_focus", "dl_wait", "dl_screenshot",
+                          "rec_start", "rec_stop", "rec_play", "rec_delete",
+                          "browser_open", "browser_navigate", "browser_click",
+                          "browser_click_text", "browser_type", "browser_press",
+                          "browser_eval", "browser_wait", "browser_scroll",
+                          "browser_search", "browser_back", "browser_close",
+                          "browser_snapshot", "browser_fill_login", "browser_tabs",
+                          "browser_wait_text",
+                          "social_cycle", "social_post",
+                          "media_tts", "media_image", "media_scene", "media_slideshow",
+                          "media_concat", "media_trim", "media_scale", "media_to_gif",
+                          "media_overlay_text", "media_extract_audio",
+                          "todowrite", "todoread", "todotoggle",
+                          "todo_list", "todo_write",
+                          "voice_listen", "voice_cmd", "voice_say"):
+                    perm.overrides[t] = "deny"
+                _role = ("Bạn là agent con CHỈ ĐỌC: tìm hiểu/trả lời, KHÔNG sửa gì. ")
             sid = _sessions.new()
             child = _Agent(self, perm, sid=sid, on_event=None)
             box = {}
             def _run():
                 try:
                     box["out"] = child.run(
-                        f"[SUBAGENT task: {desc}]\n{prompt}\n\n"
-                        "Bạn là agent con CHỈ ĐỌC: tìm hiểu/trả lời, KHÔNG sửa gì. "
+                        f"[SUBAGENT task ({kind}): {desc}]\n{prompt}\n\n"
+                        + _role +
                         "Cuối cùng trả TÓM TẮT gọn (dưới 1500 ký tự): kết quả + file/đường dẫn liên quan.")
                 except Exception as e:
                     box["out"] = f"[LOI SUBAGENT] {type(e).__name__}: {e}"

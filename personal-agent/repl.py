@@ -4,6 +4,7 @@ import config
 import sessions
 import updater
 import render
+import themes
 from mcplib import atomic_write_json
 from agentloop import Agent
 from permissions import Presets
@@ -222,13 +223,18 @@ _TOOL_LABEL = {
     "social_post": "SocialPost", "dl_find": "Find", "dl_text": "ReadScreen",
     "dl_status": "DeskStatus", "dl_apps": "Apps", "dl_tree": "DeskTree",
     "dl_click": "Click", "dl_type": "Type", "dl_key": "Key", "dl_mouse": "Mouse",
-    "dl_clipboard": "Clip",
+    "dl_clipboard": "Clip", "dl_open": "Open", "dl_focus": "Focus",
+    "dl_wait": "WaitEl", "dl_screenshot": "DeskShot",
+    "browser_snapshot": "Snap", "browser_fill_login": "Login",
+    "browser_tabs": "Tabs", "browser_wait_text": "WaitTxt",
     "rec_start": "Rec", "rec_stop": "RecStop", "rec_list": "RecList",
     "rec_show": "RecShow", "rec_play": "RecPlay", "rec_delete": "RecDel",
     "browser_status": "BStatus", "cwd": "Cwd", "chdir": "Cd",
     "lsp_supported": "LSPSup", "lsp_diagnostics": "LSPDiag", "lsp_definition": "LSPDef",
     "lsp_references": "LSPRef", "lsp_symbols": "LSPSym", "lsp_hover": "LSPHover",
     "media_status": "MediaSt",
+    "voice_status": "Mic", "voice_listen": "Nghe", "voice_cmd": "LenhNoi",
+    "voice_say": "Noi",
 }
 
 
@@ -237,10 +243,304 @@ MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
 
 # Registry lệnh / để gợi ý khi gõ sai/gõ dở (kiểu autocomplete opencode)
 _SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
-          "/stop", "/rest", "/models", "/debug", "/think", "/del", "/auto",
-          "/safe", "/status", "/stats", "/sessions", "/new", "/plan", "/build", "/agent",
-          "/lsp", "/mcp", "/init", "/keys", "/key", "/checkupdate", "/update",
-          "/overlay", "/exit", "/quit", "/export"]
+          "/stop", "/rest", "/models", "/debug", "/think", "/thinking", "/del", "/auto",
+          "/safe", "/status", "/stats", "/sessions", "/continue", "/new", "/rename", "/fork",
+          "/plan", "/build", "/agent",
+          "/lsp", "/mcp", "/init", "/keys", "/key", "/connect", "/checkupdate", "/update",
+          "/overlay", "/exit", "/quit", "/q", "/export", "/keybinds",
+          "/undo", "/redo", "/compact", "/summarize", "/details", "/editor",
+          "/themes", "/theme", "/share", "/unshare", "/import", "/voice"]
+
+
+def _attention_notify(title="Rem xong việc", msg=""):
+    """Nếu themes.attention_enabled(): kêu '\a' + notify-send (best-effort, không crash)."""
+    try:
+        try:
+            on = themes.attention_enabled()
+        except Exception:
+            on = False
+        if not on:
+            return
+    except Exception:
+        return
+    try:
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        subprocess.run(["notify-send", str(title or "Rem")[:120], str(msg or "")[:200]],
+                       timeout=3, capture_output=True)
+    except Exception:
+        pass
+
+
+def _fuzzy_find(q):
+    """Fuzzy tìm file trong cwd cho @đường_dẫn. Trả về filepath hoặc None."""
+    import glob as _glob
+    q = (q or "").strip().strip("'\"")
+    q = re.sub(r"[,\\.;:\\)\\]]+$", "", q)
+    if not q:
+        return None
+    try:
+        p = os.path.expanduser(q)
+        if os.path.isfile(p):
+            return p
+        if os.path.isfile(os.path.join(os.getcwd(), q)):
+            return os.path.join(os.getcwd(), q)
+    except Exception:
+        pass
+    try:
+        base = os.path.basename(q)
+        for pat in (q, "**/*" + base + "*"):
+            try:
+                hits = _glob.glob(os.path.join(os.getcwd(), pat), recursive=True)
+            except Exception:
+                continue
+            hits = [h for h in hits if os.path.isfile(h)]
+            if hits:
+                hits.sort(key=lambda h: (len(h), h))
+                return hits[0]
+    except Exception:
+        pass
+    try:
+        ql = os.path.basename(q).lower()
+        best = None
+        scanned = 0
+        for root, dirs, files in os.walk(os.getcwd()):
+            try:
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git")]
+            except Exception:
+                pass
+            for fn in files:
+                if ql in fn.lower():
+                    fp = os.path.join(root, fn)
+                    if best is None or len(fp) < len(best):
+                        best = fp
+                    scanned += 1
+                    if scanned > 50:
+                        return best
+            scanned += 1
+            if scanned > 2000:
+                break
+        return best
+    except Exception:
+        return None
+
+
+# @agent mentions kiểu opencode: gọi agent con / chuyển preset ngay trong tin nhắn.
+_AGENT_MENTIONS = {"explore", "general", "plan", "build"}
+
+
+def _expand_mentions(text):
+    """Chèn nội dung file cho mỗi @đường_dẫn (tối đa ~2000 ký tự mỗi file).
+    Bỏ qua @agent (explore/general/plan/build) — luồng chính xử lý riêng."""
+    try:
+        toks = re.findall(r"@(\S+)", text or "")
+        if not toks:
+            return text
+        out = text
+        for tok in toks:
+            if tok.lower().rstrip(",.;:)]}") in _AGENT_MENTIONS:
+                continue
+            fp = _fuzzy_find(tok)
+            if not fp:
+                continue
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(2000)
+                snippet = f"\n--- @{tok} -> {fp} ---\n{content}\n--- end ---\n"
+                out = out.replace("@" + tok, snippet, 1)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return text
+
+
+def _custom_dirs():
+    return [os.path.join(os.path.expanduser("~"), ".rem_ai", "commands"),
+            os.path.join(os.getcwd(), ".opencode", "commands"),
+            os.path.join(os.path.expanduser("~"), ".config", "opencode", "commands")]
+
+
+def _load_custom_commands():
+    """Load *.md custom commands (frontmatter description/agent/model/subtask/template)
+    + mục 'command' trong opencode.json (global ~/.config/opencode + project .opencode).
+    Thứ tự thắng: project > global > file md (giống opencode)."""
+    cmds = {}
+    for d in _custom_dirs():
+        try:
+            files = sorted(os.listdir(d))
+        except Exception:
+            continue
+        for fn in files:
+            if not fn.endswith(".md"):
+                continue
+            name = fn[:-3]
+            if name in cmds:
+                continue
+            try:
+                with open(os.path.join(d, fn), encoding="utf-8") as f:
+                    raw = f.read()
+            except Exception:
+                continue
+            desc, agent, model, subtask, tmpl = "", "", "", False, raw
+            if raw.startswith("---"):
+                try:
+                    p2 = raw.split("---", 2)
+                    if len(p2) >= 3:
+                        fm, tmpl = p2[1], p2[2].lstrip("\n")
+                        for ln in fm.splitlines():
+                            if ":" in ln:
+                                k, v = ln.split(":", 1)
+                                k = k.strip().lower()
+                                v = v.strip().strip("'\"")
+                                if k == "description":
+                                    desc = v
+                                elif k == "agent":
+                                    agent = v
+                                elif k == "model":
+                                    model = v
+                                elif k == "subtask":
+                                    subtask = v.lower() in ("true", "1", "yes")
+                except Exception:
+                    pass
+            cmds[name] = {"description": desc, "agent": agent, "model": model,
+                          "subtask": subtask, "template": tmpl,
+                          "path": os.path.join(d, fn)}
+    # Merge opencode.json "command" (ghi đè file md trùng tên, kiểu opencode)
+    for _cfg in (os.path.join(os.path.expanduser("~"), ".config", "opencode", "opencode.json"),
+                 os.path.join(os.path.expanduser("~"), ".config", "opencode", "opencode.jsonc"),
+                 os.path.join(os.getcwd(), ".opencode", "opencode.json"),
+                 os.path.join(os.getcwd(), ".opencode", "opencode.jsonc")):
+        try:
+            with open(_cfg, encoding="utf-8") as f:
+                _raw = f.read()
+            import re as _re
+            _raw = _re.sub(r"//[^\n]*", "", _raw)  # jsonc: bỏ comment //
+            _data = json.loads(_raw) or {}
+            _cc = _data.get("command") or {}
+            if isinstance(_cc, dict):
+                for _n, _c in _cc.items():
+                    if not isinstance(_c, dict):
+                        continue
+                    cmds[str(_n)] = {
+                        "description": str(_c.get("description") or ""),
+                        "agent": str(_c.get("agent") or ""),
+                        "model": str(_c.get("model") or ""),
+                        "subtask": bool(_c.get("subtask", False)),
+                        "template": str(_c.get("template") or ""),
+                        "path": _cfg,
+                    }
+        except Exception:
+            continue
+    return cmds
+
+
+def _expand_custom_template(tmpl, argstr, arglist, manager=None):
+    out = (tmpl or "").replace("$ARGUMENTS", argstr or "")
+    for i, a in enumerate((arglist or [])[:9], 1):
+        out = out.replace(f"${i}", a)
+
+    def _repl(m):
+        c = m.group(1)
+        try:
+            if manager is not None:
+                try:
+                    r = manager.call("bash", {"command": c}, timeout=30)
+                    return str(r)[:2000]
+                except Exception:
+                    pass
+            r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=30)
+            o = ((r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")).strip()
+            return o[:2000] or ""
+        except Exception as e:
+            return f"[LOI {e}]"
+    try:
+        out = re.sub(r"!`([^`]+)`", _repl, out)
+    except Exception:
+        pass
+    try:
+        out = _expand_mentions(out)
+    except Exception:
+        pass
+    return out
+
+
+def _import_session_file(fp):
+    """Đọc JSON session opencode-style hoặc JSONL Rem → list msgs chuẩn {role,content}."""
+    msgs = []
+    with open(fp, "r", encoding="utf-8") as f:
+        raw_txt = f.read()
+    data = None
+    try:
+        data = json.loads(raw_txt)
+    except Exception:
+        data = None
+    cands = []
+    if isinstance(data, list):
+        cands = data
+    elif isinstance(data, dict):
+        for k in ("messages", "msgs", "history", "data", "turns"):
+            if isinstance(data.get(k), list):
+                cands = data[k]
+                break
+        else:
+            # thử JSONL từng dòng
+            cands = []
+            for ln in raw_txt.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    cands.append(json.loads(ln))
+                except Exception:
+                    continue
+            if not cands:
+                # dict đơn?
+                if "role" in data or "content" in data or "text" in data:
+                    cands = [data]
+    else:
+        for ln in raw_txt.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                cands.append(json.loads(ln))
+            except Exception:
+                continue
+    for r in cands:
+        if not isinstance(r, dict):
+            continue
+        role = r.get("role") or r.get("type") or "user"
+        role = str(role).lower().strip()
+        if role in ("human", "user_message"):
+            role = "user"
+        elif role in ("ai", "assistant_message", "model"):
+            role = "assistant"
+        if role not in ("user", "assistant", "tool", "system"):
+            role = "user"
+        content = r.get("content", r.get("text", r.get("body", "")))
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, str):
+                    parts.append(p)
+                elif isinstance(p, dict):
+                    parts.append(str(p.get("text") or p.get("content") or p.get("input") or ""))
+            content = "\n".join(x for x in parts if x)
+        elif isinstance(content, dict):
+            content = json.dumps(content, ensure_ascii=False)
+        content = str(content or "")
+        if not content.strip() and not r.get("tool_calls"):
+            continue
+        m = {"role": role, "content": content}
+        for k in ("tool_call_id", "name", "tool_calls"):
+            if r.get(k) is not None:
+                m[k] = r[k]
+        msgs.append(m)
+    return msgs
 
 
 def _p(s, col="cy", end="\n"):
@@ -270,6 +570,11 @@ def _type(s, col=None):
     chữ user gõ bị nhịn (phải chờ Enter mới hiện). Giờ in tức thì, bỏ hẹn giờ."""
     if not sys.stdin.isatty() or config.DEBUG:
         _p(_strip_ansi(s), col if col is not None else "")
+        return
+    # Gọn: cắt dòng trắng thừa ở cuối đáp án (model hay trả "\n\n" cuối câu
+    # → hiện thành 2-3 dòng trắng trống dưới mỗi câu trả lời).
+    s = re.sub(r"(\n\s*)+\Z", "", s)
+    if not s.strip():
         return
     text = s if col is None else (C.get(col, "") + s + C["reset"])
     with _OUT_LOCK:
@@ -401,9 +706,55 @@ class Repl:
         self._input_buf = []        # buffer ký tự đang gõ (để _p vẽ lại khi chen ngang)
         self._input_prompt = ""     # prompt hiện tại (để _p vẽ lại khi chen ngang)
         self._last_esc = 0.0      # mốc ESC gần nhất (ESC đúp ≤0.8s = dừng cứng kiểu opencode)
+        self.verbose = False        # /details: khi bật in thêm 3 dòng đầu result tool
+        self._verbose = False       # alias tương thích
+        self.show_thinking = True   # /thinking: hiện khối suy luận khi agent trả lời (kiểu opencode)
+        self._hist = self._hist_load()  # lịch sử lệnh (↑/↓) kiểu opencode
+        self._hist_i = None         # vị trí đang xem trong history (None = đang gõ mới)
+        self._hist_draft = ""       # dòng đang gõ dở trước khi bấm ↑
+        try:
+            # Áp theme lúc khởi động (chỉ đổi màu UI dict C, GIỮ NGUYÊN logo REM)
+            _patch = themes.apply()
+            if isinstance(_patch, dict):
+                C.update(_patch)
+        except Exception:
+            pass
         global _ACTIVE_REPL
         _ACTIVE_REPL = self
         self._mk_agent()
+
+    def _hist_load(self):
+        """Đọc lịch sử lệnh (~/.rem_ai/history, tối đa 200 dòng cuối)."""
+        try:
+            fp = os.path.join(config.DIR, "history")
+            with open(fp, encoding="utf-8") as f:
+                return [ln.rstrip("\n") for ln in f if ln.strip()][-200:]
+        except Exception:
+            return []
+
+    def _hist_push(self, line):
+        """Lưu 1 lệnh vào history (bỏ trùng liên tiếp, tối đa 500)."""
+        try:
+            line = (line or "").strip()
+            if not line:
+                return
+            if self._hist and self._hist[-1] == line:
+                return
+            self._hist.append(line)
+            self._hist = self._hist[-500:]
+            fp = os.path.join(config.DIR, "history")
+            tmp = fp + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("\n".join(self._hist[-500:]) + "\n")
+            os.replace(tmp, fp)
+        except Exception:
+            pass
+        finally:
+            try:
+                self._hist_i = None
+                self._hist_draft = ""
+            except Exception:
+                pass
 
     def _mk_agent(self, sid=None):
         self._agent = Agent(self.manager, Presets.build(), sid=sid or self.sid,
@@ -481,21 +832,62 @@ class Repl:
             except Exception:
                 return ""
         try:
-            _ty.setcbreak(fd)
+            # RAW (không phải cbreak): tắt ISIG để Ctrl+C thành byte \x03 cho code
+            # tự xử lý (đang gõ → xóa dòng; rảnh → thoát). cbreak giữ ISIG nên
+            # SIGINT giáng thẳng xuống process, nhánh "\x03" thành dead code và
+            # đang gõ dở vẫn bị thoát oan.
+            _ty.setraw(fd)
+            import codecs as _cd
+            _dec = _cd.getincrementaldecoder("utf-8")("replace")
+
+            def _rd1(_wait=0.0):
+                """Đọc 1 ký tự từ fd bằng os.read (KHÔNG qua buffer của sys.stdin).
+                Bắt buộc: select()+sys.stdin.read() kẹt khi wrapper đã nuốt chunk
+                vào buffer (select trên fd không thấy) → treo khi gõ nhanh/paste.
+                Ghép byte UTF-8 dần (tiếng Việt 2-3 bytes)."""
+                _ch = ""
+                for _k in range(4):
+                    if _k and _wait >= 0:
+                        try:
+                            if not _sel.select([fd], [], [], max(0.0, _wait or 0.05))[0]:
+                                break
+                        except Exception:
+                            break
+                    try:
+                        _b = os.read(fd, 1)
+                    except Exception:
+                        break
+                    if not _b:
+                        break
+                    try:
+                        _ch += _dec.decode(_b)
+                    except Exception:
+                        break
+                    if _ch:
+                        break
+                if not _ch:
+                    try:
+                        _dec.reset()
+                    except Exception:
+                        pass
+                return _ch
+
             while True:
                 # CHỐNG KẸT CHỮ (gõ bị dính tới khi Enter): echo KHÔNG khóa _OUT_LOCK.
                 # Worker (spinner/_p/_type) giữ khóa luân phiên → nếu echo đợi lock,
                 # phím gõ bị nhịn không hiện tới khi Enter nhả lock. Echo lock-free
                 # giúp chữ hiện NGAY; khi worker vẽ/redraw đè thì nó tự vẽ lại buf.
                 try:
-                    rl, _, _ = _sel.select([sys.stdin], [], [], 0.1)
+                    rl, _, _ = _sel.select([fd], [], [], 0.1)
                 except Exception:
-                    rl = [sys.stdin]
+                    rl = [fd]
                 if not rl:
                     continue
                 try:
-                    ch = sys.stdin.read(1)
+                    ch = _rd1()
                 except Exception:
+                    continue
+                if not ch:
                     continue
                 if not ch:
                     continue
@@ -507,6 +899,18 @@ class Repl:
                         pass
                     return "".join(buf).strip()
                 if ch == "\x03":  # Ctrl+C
+                    if buf:
+                        # Đang gõ dở → xóa dòng (kiểu opencode), KHÔNG thoát.
+                        # (Bản cũ thoát luôn cả khi đang gõ dở.)
+                        try:
+                            with _OUT_LOCK:
+                                _erase_input_locked(self)
+                                del buf[:]
+                                self._hist_i = None
+                                _redraw_input_locked(self)
+                        except Exception:
+                            pass
+                        continue
                     with _OUT_LOCK:
                         try:
                             sys.stdout.write("\n")
@@ -525,24 +929,77 @@ class Repl:
                         raise EOFError
                     continue
                 if ch in ("\x7f", "\x08"):  # Backspace
-                    if buf:
-                        buf.pop()
-                        try:  # echo lock-free (xem ghi chú chống kẹt chữ ở đầu vòng lặp)
-                            sys.stdout.write("\b \b")
-                            sys.stdout.flush()
-                        except Exception:
-                            pass
+                    with _OUT_LOCK:
+                        if buf:
+                            buf.pop()
+                            # opencode-style: vẽ lại CẢ buffer sau mỗi phím (xóa cũ + in list)
+                            # — không gõ lẻ từng ký tự để khỏi lệch cursor ở mép wrap → dính dòng
+                            _erase_input_locked(self)
+                            _redraw_input_locked(self)
                     continue
                 if ch == "\x1b":  # ESC — phân biệt ESC lẻ vs phím mũi tên
                     try:
-                        rl2, _, _ = _sel.select([sys.stdin], [], [], 0.05)
+                        rl2, _, _ = _sel.select([fd], [], [], 0.05)
                     except Exception:
                         rl2 = []
                     if rl2:
-                        # Escape sequence (mũi tên/F-key...) → nuốt hết, không chèn rác
+                        # Escape sequence: đọc thêm để phân biệt ↑/↓ (history)
+                        # với phím khác. Không đọc được → nuốt như cũ.
+                        _seq = ""
                         try:
-                            while _sel.select([sys.stdin], [], [], 0.02)[0]:
-                                sys.stdin.read(1)
+                            for _ in range(3):
+                                if _sel.select([fd], [], [], 0.03)[0]:
+                                    _seq += _rd1()
+                                else:
+                                    break
+                        except Exception:
+                            pass
+                        if _seq in ("[A", "[B"):
+                            # ↑/↓ kiểu opencode: lùi/tới lịch sử lệnh.
+                            # (Bản cũ nuốt hết phím mũi tên dù /keybinds vẫn ghi
+                            # "↑/↓ lịch sử lệnh".)
+                            try:
+                                with _OUT_LOCK:
+                                    _hist = getattr(self, "_hist", []) or []
+                                    if _hist:
+                                        _i = getattr(self, "_hist_i", None)
+                                        if _seq == "[A":
+                                            if _i is None:
+                                                try:
+                                                    self._hist_draft = "".join(buf)
+                                                except Exception:
+                                                    self._hist_draft = ""
+                                                _i = len(_hist) - 1
+                                            else:
+                                                _i = max(0, _i - 1)
+                                            _erase_input_locked(self)
+                                            del buf[:]
+                                            buf.extend(list(_hist[_i]))
+                                            self._hist_i = _i
+                                            _redraw_input_locked(self)
+                                        else:
+                                            if _i is not None:
+                                                _erase_input_locked(self)
+                                                if _i + 1 >= len(_hist):
+                                                    del buf[:]
+                                                    try:
+                                                        buf.extend(list(self._hist_draft or ""))
+                                                    except Exception:
+                                                        pass
+                                                    self._hist_i = None
+                                                else:
+                                                    _i = _i + 1
+                                                    del buf[:]
+                                                    buf.extend(list(_hist[_i]))
+                                                    self._hist_i = _i
+                                                _redraw_input_locked(self)
+                            except Exception:
+                                pass
+                            continue
+                        # Phím khác (←/→/F-key/Alt...) → nuốt hết, không chèn rác
+                        try:
+                            while _sel.select([fd], [], [], 0.02)[0]:
+                                os.read(fd, 32)
                         except Exception:
                             pass
                         continue
@@ -576,12 +1033,54 @@ class Repl:
                     o = ord(ch)
                 except Exception:
                     o = 32
+                if ch == "\t":
+                    # Tab kiểu opencode: chuyển agent PLAN ↔ BUILD.
+                    # Phân biệt paste (còn ký tự chờ sau Tab, hoặc đang gõ dở)
+                    # → chèn spaces giữ nguyên liệu, không chuyển oan.
+                    try:
+                        _more = bool(_sel.select([fd], [], [], 0.02)[0])
+                    except Exception:
+                        _more = False
+                    if _more or buf:
+                        for _sp in "  ":
+                            buf.append(_sp)
+                            try:
+                                sys.stdout.write(_sp)
+                                sys.stdout.flush()
+                            except Exception:
+                                pass
+                        continue
+                    # Tab trần khi dòng trống → đổi agent, VẼ LẠI CÙNG DÒNG
+                    # (không in dòng mới — gọn như opencode, pill [plan]/[build]
+                    # trong prompt cho thấy đã chuyển).
+                    try:
+                        with _OUT_LOCK:
+                            _erase_input_locked(self)
+                            try:
+                                if getattr(self, "presets", "build") == "plan":
+                                    self._agent.perm = Presets.build()
+                                    self.presets = "build"
+                                else:
+                                    self._agent.perm = Presets.plan()
+                                    self.presets = "plan"
+                            except Exception:
+                                pass
+                            try:
+                                self._input_prompt = self._prompt_hint()
+                            except Exception:
+                                pass
+                            self._hist_i = None
+                            _redraw_input_locked(self)
+                    except Exception:
+                        pass
+                    continue
                 if o < 32:
-                    continue  # bỏ control char khác (giữ \t? Tab gõ tay = focus, không chèn)
+                    continue  # bỏ control char khác
                 buf.append(ch)
-                try:  # echo lock-free (xem ghi chú chống kẹt chữ ở đầu vòng lặp)
-                    sys.stdout.write(ch)
-                    sys.stdout.flush()
+                try:
+                    with _OUT_LOCK:
+                        sys.stdout.write(ch)
+                        sys.stdout.flush()
                 except Exception:
                     pass
         finally:
@@ -621,14 +1120,27 @@ class Repl:
             if len(self._tool_rows) > 14:
                 self._tool_rows.pop(0)
             _p(row, "gr" if ok else "rd")
-            # Diff cũ/mới kiểu opencode: hiện ngay dưới dòng ✓ khi sửa/tạo file
-            # màn hình rộng → 2 cột CŨ|MỚI, hẹp → diff 1 cột
+            # /details: khi bật in thêm 3 dòng đầu result tool
+            try:
+                if getattr(self, "verbose", False) or getattr(self, "_verbose", False):
+                    for _ln in str(r or "").strip().splitlines()[:3]:
+                        _p("  │ " + _ln[:160], "dim")
+            except Exception:
+                pass
+            # Diff cũ/mới kiểu opencode: hiện ngay dưới dòng ✓ khi sửa/tạo file.
+            # Tôn trọng tui.json diff_style: stacked = luôn 1 cột, side = 2 cột
+            # khi đủ rộng, auto = theo độ rộng terminal.
             if ok and ev.get("name") in ("edit_file", "write_file", "apply_patch") and ev.get("full"):
                 try:
-                    if render.term_width() >= 100:
-                        d = render.side_diff_to_ansi(ev.get("full"))
-                    else:
+                    try:
+                        _ds = themes.diff_style()
+                    except Exception:
+                        _ds = "auto"
+                    _wide = render.term_width() >= 100
+                    if _ds == "stacked" or (_ds == "auto" and not _wide):
                         d = render.diff_to_ansi(ev.get("full"))
+                    else:
+                        d = render.side_diff_to_ansi(ev.get("full")) if _wide else render.diff_to_ansi(ev.get("full"))
                 except Exception:
                     d = ""
                 if d:
@@ -877,8 +1389,8 @@ class Repl:
                     try:
                         think, body = render.split_thinking(out)
                         self._last_think = think
-                        # Opencode-style thinking block
-                        if think.strip():
+                        # Opencode-style thinking block (tắt bằng /thinking)
+                        if think.strip() and self.show_thinking:
                             _type(render.thinking_to_ansi(think, full=False), None)
                         # Body — render markdown sạch (opencode-style)
                         if body.strip():
@@ -895,6 +1407,10 @@ class Repl:
                             sys.stdout.flush()
                 try:
                     _overlay_write(mode="XONG", tool="", progress="xong — lần sau phát lại nhanh")
+                except Exception:
+                    pass
+                try:
+                    _attention_notify("Rem xong việc", (payload or "")[:120])
                 except Exception:
                     pass
                 self._pending = 0
@@ -938,7 +1454,39 @@ class Repl:
             return
         for sid, t, first in rows:
             mark = "*" if sid == self.sid else " "
-            _p(f"{mark} {sid}  ({t})  {first}", "cy")
+            try:
+                title = sessions.get_title(sid)
+            except Exception:
+                title = first
+            _p(f"{mark} {sid}  ({t})  {title[:60]}", "cy")
+        _p("Gõ /sessions <id> để chuyển · /rename <tên> đặt tên · /fork nhân bản", "dim")
+
+    def _switch_session(self, sid):
+        """Chuyển sang session sid (kiểm tra tồn tại). Trả True nếu chuyển được."""
+        sid = (sid or "").strip()
+        if not sid:
+            return False
+        try:
+            ok = any(s == sid for s, _, _ in sessions.list_all())
+        except Exception:
+            ok = False
+        if not ok:
+            # cho phép id rút gọn (tiền tố duy nhất)
+            try:
+                cands = [s for s, _, _ in sessions.list_all() if s.startswith(sid)]
+                if len(cands) == 1:
+                    sid = cands[0]
+                    ok = True
+            except Exception:
+                pass
+        if not ok:
+            _p(f"Không thấy session '{sid}'. Gõ /sessions để xem.", "ye")
+            return False
+        self.sid = sid
+        self.rec_mode = ""
+        self._mk_agent(sid=self.sid)
+        _p(f"Đã chuyển session → {sid}", "gr")
+        return True
 
     def _keys(self):
         ks = groq.keys()
@@ -1004,10 +1552,60 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         except Exception as e:
             _p(f"[LOI] không ghi AGENTS.md: {e}", "rd")
 
+    def _run_agent_mention(self, line):
+        """Xử lý @agent kiểu opencode. Trả None nếu đã tiêu thụ, str để gửi tiếp."""
+        toks = [t.lower().rstrip(",.;:)]}") for t in re.findall(r"@(\S+)", line or "")]
+        hits = [t for t in toks if t in _AGENT_MENTIONS]
+        if not hits:
+            return line
+        # @plan/@build: chuyển preset rồi gửi phần còn lại như tin thường
+        if "plan" in hits:
+            try:
+                self._agent.perm = Presets.plan()
+                self.presets = "plan"
+                _p("(preset PLAN cho tin này — tool ghi/bash bị cấm)", "dim")
+            except Exception:
+                pass
+            line = re.sub(r"@plan\b", "", line, flags=re.I).strip()
+            hits = [h for h in hits if h != "plan"]
+        if "build" in hits:
+            try:
+                self._agent.perm = Presets.build()
+                self.presets = "build"
+            except Exception:
+                pass
+            line = re.sub(r"@build\b", "", line, flags=re.I).strip()
+            hits = [h for h in hits if h != "build"]
+        if not hits:
+            return line
+        # @explore/@general: agent con chạy đồng bộ, chỉ trả tóm tắt (subtask)
+        kind = "general" if "general" in hits else "explore"
+        prompt = re.sub(r"@(?:explore|general)\b", "", line, flags=re.I).strip()
+        if not prompt:
+            _p(f"Cú pháp: @{kind} <việc cần làm>  (vd @{kind} tìm chỗ xử lý đăng nhập)", "dim")
+            return None
+        if self._busy:
+            _p(f"Agent đang bận — đã xếp hàng, agent chính sẽ tự dùng task {kind}.", "ye")
+            return line
+        _p(f"⏳ @{kind} đang làm (context riêng)...", "cy")
+        try:
+            out = self.manager._run_subagent(
+                {"description": f"@{kind}", "prompt": prompt, "type": kind}, timeout=180)
+        except Exception as e:
+            out = f"[LOI] @{kind}: {type(e).__name__}: {e}"
+        _p(f"— @{kind} xong —", "bold")
+        _p(out or "(rỗng)", "gr")
+        return None
+
     def _send(self, text):
         """Gửi câu lệnh vào hàng đợi agent (hiện khối User như khi gõ tay)."""
-        sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + text + C["reset"] + "\n")
+        sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + text + "\n")
         sys.stdout.flush()
+        try:
+            # Snapshot git trước lượt chạy để /undo hoàn tác file kiểu opencode
+            sessions.work_snapshot(self.sid)
+        except Exception:
+            pass
         if self._busy:
             self._pending += 1
             _p(f"⏳ Câu hỏi đã xếp hàng (#{self._pending}).", "ye")
@@ -1041,16 +1639,17 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         if not msgs:
             _p("(session trống)", "dim")
 
-    def _export(self):
-        """Xuất đoạn chat hiện tại ra markdown (lưu ~/.rem_ai/exports/<sid>.md)."""
+    def _export(self, open_editor=False):
+        """Xuất đoạn chat hiện tại ra markdown (lưu ~/.rem_ai/exports/<sid>.md).
+        open_editor=True (kiểu opencode /export): mở file bằng $EDITOR. Trả path hoặc ''."""
         try:
             msgs = sessions.load(self.sid)
         except Exception as e:
             _p(f"[LOI] không đọc được session: {e}", "rd")
-            return
+            return ""
         if not msgs:
             _p("(đoạn chat trống, không có gì để xuất)", "dim")
-            return
+            return ""
         lines = [f"# Chat {self.sid}", ""]
         for m in msgs:
             role = m.get("role", "?")
@@ -1071,6 +1670,16 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p(f"Đã xuất {len(msgs)} tin nhắn → {fp}", "gr")
         except Exception as e:
             _p(f"[LOI] không ghi được file: {e}", "rd")
+            return ""
+        if open_editor:
+            ed = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+            try:
+                subprocess.run([ed, fp])
+            except FileNotFoundError:
+                _p(f"Không mở được $EDITOR='{ed}' (file vẫn ở {fp}).", "ye")
+            except Exception:
+                pass
+        return fp
 
     def _list_items_all(self):
         """Quét macro + skill + session → [(kind, id, desc)]."""
@@ -1183,12 +1792,123 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         _p("  Ra lệnh thao tác desktop như bình thường — xong gõ /done để dừng & lưu.", "dim")
         self._send(f"Dùng rec_start để bắt đầu ghi macro tên '{self.rec_mode}' mục '{cat}'")
 
+    def _run_bang(self, line):
+        """Dòng bắt đầu `!` → chạy bash trực tiếp qua manager (không qua LLM)."""
+        bcmd = (line[1:] if line.startswith("!") else line).strip()
+        if not bcmd:
+            _p("Cú pháp: !<lệnh bash>  (vd !ls -la)", "dim")
+            return
+        try:
+            out = self.manager.call("bash", {"command": bcmd}, timeout=60)
+        except Exception:
+            try:
+                r = subprocess.run(bcmd, shell=True, capture_output=True, text=True, timeout=60)
+                out = ((r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")).strip()
+                out = out or "(không có output)"
+            except Exception as e:
+                out = f"[LOI] {type(e).__name__}: {e}"
+        _p(f"$ {bcmd}", "dim")
+        _p(str(out)[:4000] or "(không có output)", "")
+
+    def _run_custom(self, name, argstr):
+        """Chạy custom command /tên (template như user prompt). Trả True nếu đã chạy.
+        Hỗ trợ frontmatter kiểu opencode: agent (subagent → chạy context riêng),
+        subtask=true (ép chạy subagent), model (đổi model cho lần chạy này)."""
+        try:
+            cmds = _load_custom_commands()
+        except Exception:
+            return False
+        if name not in cmds:
+            return False
+        c = cmds[name]
+        args = (argstr or "").split() if (argstr or "").strip() else []
+        try:
+            expanded = _expand_custom_template(c.get("template", ""), argstr or "", args, manager=self.manager)
+        except Exception as e:
+            _p(f"[LOI] custom command '{name}': {e}", "rd")
+            return True
+        prompt = (expanded or "").strip() or (argstr or "")
+        if not prompt.strip():
+            _p(f"(custom '{name}' trống — không gửi)", "dim")
+            return True
+        agent = str(c.get("agent") or "").strip().lower()
+        model = str(c.get("model") or "").strip()
+        subtask = bool(c.get("subtask", False)) or agent in ("general", "explore", "plan")
+        # Đổi model cho lần chạy (kiểu opencode custom command model)
+        _old_fav = ""
+        if model:
+            try:
+                _old_fav = groq.get_favorite()
+                if groq.set_favorite(model):
+                    _p(f"(custom '{name}': model → {model})", "dim")
+            except Exception:
+                pass
+        try:
+            if subtask and not self._busy:
+                # Chạy trong subagent (không ngập context chính)
+                kind = "general" if agent in ("general", "build") else "explore"
+                _p(f"⏳ /{name} chạy subagent {kind}...", "cy")
+                try:
+                    out = self.manager._run_subagent(
+                        {"description": name, "prompt": prompt, "type": kind}, timeout=240)
+                except Exception as e:
+                    out = f"[LOI] /{name}: {type(e).__name__}: {e}"
+                _p(out or "(rỗng)", "gr")
+            else:
+                if agent == "plan":
+                    try:
+                        self._agent.perm = Presets.plan()
+                        self.presets = "plan"
+                    except Exception:
+                        pass
+                elif agent == "build":
+                    try:
+                        self._agent.perm = Presets.build()
+                        self.presets = "build"
+                    except Exception:
+                        pass
+                self._send(prompt)
+        finally:
+            if model:
+                # Subtask xong → trả model cũ; primary path giữ model mới cho cả
+                # lượt agent (trả lại sau khi hàng chờ rỗng thì phức tạp — giữ lại
+                # và báo rõ, user đổi lại bằng /models).
+                if not (subtask and not self._busy):
+                    pass
+                else:
+                    try:
+                        if _old_fav:
+                            groq.set_favorite(_old_fav)
+                        else:
+                            try:
+                                os.remove(groq._MODEL_FILE)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        return True
+
     def slash(self, line):
         cmd = line.strip()
         parts = cmd.split()
+        # Custom command được ưu tiên TRƯỚC builtin (giống opencode: custom
+        # trùng tên sẽ override lệnh có sẵn).
+        if cmd.startswith("/"):
+            try:
+                _frag0 = cmd.split()[0]
+                _cname = _frag0[1:]
+                if _cname and _cname not in ("exit", "quit", "q"):
+                    try:
+                        _cmds0 = _load_custom_commands()
+                    except Exception:
+                        _cmds0 = {}
+                    if _cname in _cmds0:
+                        if self._run_custom(_cname, cmd[len(_frag0):].strip()):
+                            return True
+            except Exception:
+                pass
         if cmd == "/help":
-            _p(
-                "\n".join([
+            _lines = [
                     "/help    trợ giúp",
                     "/list    liệt kê macro/skill/chat cũ (gõ số để mở)",
                     "/rec     ghi thao tác desktop thành macro",
@@ -1197,10 +1917,13 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/done    dừng ghi macro & lưu (khi đang ⏺ ghi)",
                     "/status  xem extension + tool + session",
                     "/stats   thống kê dùng: tin nhắn, tool calls, ký tự (kiểu opencode stats)",
-                    "/sessions liệt kê session cũ",
-                    "/models  xem model đang dùng (chat/compact)",
+                    "/sessions [/continue]  liệt kê/chuyển session cũ",
                     "/new     tạo session mới",
+                    "/rename <tên>  đặt tên session hiện tại",
+                    "/fork    nhân bản session hiện tại thành session mới",
                     "/del <id>  xoá 1 session cũ",
+                    "/models [số]  xem/chọn model chat (ghim yêu thích)",
+                    "/connect thêm provider/key (chọn Groq, dán key)",
                     "/plan    chuyển preset PLAN (chỉ đọc)",
                     "/build   quay lại preset BUILD",
                     "/auto    tự động — không hỏi (mặc định)",
@@ -1209,19 +1932,42 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
                     "/debug   bật/tắt chế độ gỡ lỗi",
                     "/think   xem đầy đủ suy luận của lần trả lời cuối",
+                    "/thinking [on|off]  hiện/ẩn khối suy luận (kiểu opencode)",
                     "/clear   xoá màn hình (hiện logo REM)",
                     "/overlay on|off|status  cửa sổ nổi hiện việc đang làm",
                     "/checkupdate  kiểm tra bản mới trên GitHub",
                     "/update  tự cập nhật bản mới nhất (git/tarball)",
                     "/lsp <file>  kiểm tra lỗi file nguồn (clangd/pylsp)",
                     "/mcp     xem / nạp lại MCP server ngoài (~/.rem_ai/mcp.json)",
-                    "/export  xuất đoạn chat hiện tại ra file markdown",
+                    "/export  xuất chat ra markdown + mở $EDITOR",
+                    "/keybinds  bảng phím tắt (tương đương opencode)",
+                    "/undo    lùi 1 turn (kèm hoàn tác file đã đổi, cần git)",
+                    "/redo    làm lại turn vừa undo (kèm file)",
+                    "/compact|/summarize  ép tóm tắt context ngay",
+                    "/details [on|off]  bật/tắt chi tiết tool (3 dòng đầu result)",
+                    "/editor  mở $EDITOR soạn tin rồi gửi",
+                    "/themes|/theme [tên]  liệt kê / chuyển theme",
+                    "/share   export markdown local (~/.rem_ai/exports/)",
+                    "/unshare gỡ share local (stub)",
+                    "/import <file>  nhập JSON opencode hoặc JSONL Rem",
+                    "/voice [status|nghe [giây]|nói <text>|<lệnh thoại>]  mic/STT/TTS tiếng Việt",
                     "/init    tạo AGENTS.md cho thư mục đang làm việc",
                     "/keys    xem số Groq keys",
                     "/key gsk_...  thêm Groq key",
-                    "/exit    thoát",
-                ]), "dim",
-            )
+                    "/<tên-file> custom command (*.md: ~/.rem_ai/commands/, .opencode/commands/, ~/.config/opencode/commands/)",
+                    "@file   chèn nội dung file vào prompt · @explore/@general gọi agent con",
+                    "!cmd    chạy bash trực tiếp",
+                    "/exit|/quit|/q  thoát",
+            ]
+            try:
+                _cc = _load_custom_commands()
+                _builtins = {s.lstrip("/") for s in _SLASH}
+                _extras = sorted(n for n in _cc if n not in _builtins)
+                if _extras:
+                    _lines.append("— lệnh riêng của bạn: " + " · ".join("/" + n for n in _extras[:20]))
+            except Exception:
+                pass
+            _p("\n".join(_lines), "dim")
         elif cmd == "/list" or cmd.startswith("/list "):
             if len(parts) > 1:
                 if not self._list_items:
@@ -1304,9 +2050,39 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             if r.stderr and r.stderr.strip():
                 out += ("\n" if out else "") + r.stderr.strip()
             _p("\n".join(f"  {ln}" for ln in out.splitlines()) or "(không có phản hồi)", "gr" if r.returncode == 0 else "ye")
-        elif cmd == "/models":
-            _p(f"Chat  : {', '.join(groq.chat_models()[:4]) or '(chưa có keys)'}", "cy")
-            _p(f"Compact: {', '.join(groq.clone_models()[:2]) or '(chưa có keys)'}", "cy")
+        elif cmd == "/models" or cmd.startswith("/models "):
+            try:
+                ms = list(groq.chat_models()[:8]) or []
+            except Exception:
+                ms = []
+            try:
+                fav = groq.get_favorite()
+            except Exception:
+                fav = ""
+            if len(parts) >= 2 and parts[1].isdigit():
+                try:
+                    i = int(parts[1]) - 1
+                    sel = ms[i] if 0 <= i < len(ms) else ""
+                except Exception:
+                    sel = ""
+                if not sel:
+                    _p(f"Số không đúng (1-{len(ms)}).", "ye")
+                elif groq.set_favorite(sel):
+                    _p(f"Đã ghim model chat → {sel} (dùng cho các lượt sau).", "gr")
+                else:
+                    _p("[LOI] không lưu được model.", "rd")
+            else:
+                if not ms:
+                    _p("(chưa có keys — gõ /connect để thêm)", "ye")
+                for i, m in enumerate(ms, 1):
+                    mark = "★" if (m == fav or (not fav and i == 1)) else " "
+                    _p(f"{mark} {i}. {m}", "cy" if mark == "★" else "dim")
+                try:
+                    _p(f"Compact: {', '.join(groq.clone_models()[:2]) or '(chưa có keys)'}", "dim")
+                except Exception:
+                    pass
+                if ms:
+                    _p("Gõ /models <số> để ghim model chat yêu thích.", "dim")
         elif cmd == "/debug":
             config.DEBUG = not config.DEBUG
             _p(f"Chế độ gỡ lỗi: {'BẬT' if config.DEBUG else 'TẮT'}", "gr")
@@ -1315,6 +2091,15 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 _type(render.thinking_to_ansi(self._last_think, full=True), None)
             else:
                 _p("(chưa có suy luận nào để xem — câu trả lời không dùng thẻ thinking)", "dim")
+        elif cmd == "/thinking" or cmd.startswith("/thinking "):
+            arg = (parts[1].lower() if len(parts) > 1 else "toggle")
+            if arg in ("on", "true", "1", "hiện", "hien", "bật", "bat"):
+                self.show_thinking = True
+            elif arg in ("off", "false", "0", "ẩn", "an", "tắt", "tat"):
+                self.show_thinking = False
+            else:
+                self.show_thinking = not self.show_thinking
+            _p(f"Hiện khối suy luận: {'BẬT' if self.show_thinking else 'TẮT'}", "gr")
         elif cmd == "/del":
             if len(parts) < 2:
                 _p("Cú pháp: /del <session-id>  (xem /sessions)", "dim")
@@ -1330,8 +2115,32 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             self._status()
         elif cmd == "/stats":
             self._stats()
-        elif cmd == "/sessions":
-            self._sessions()
+        elif cmd == "/sessions" or cmd.startswith("/sessions ") or cmd == "/continue" or cmd.startswith("/continue "):
+            _arg = cmd.split(None, 1)[1].strip() if len(cmd.split(None, 1)) > 1 else ""
+            if _arg:
+                self._switch_session(_arg)
+            else:
+                self._sessions()
+        elif cmd == "/rename" or cmd.startswith("/rename "):
+            _t = cmd[len("/rename"):].strip()
+            if not _t:
+                _p(f"Tên hiện tại: {sessions.get_title(self.sid)}", "dim")
+                _p("Cú pháp: /rename <tên mới>", "dim")
+            elif sessions.set_title(self.sid, _t):
+                _p(f"Đã đặt tên session → {_t[:80]}", "gr")
+            else:
+                _p("[LOI] không lưu được tên.", "rd")
+        elif cmd == "/fork":
+            try:
+                nid = sessions.fork(self.sid)
+            except Exception as e:
+                nid = ""
+                _p(f"[LOI] fork: {type(e).__name__}: {e}", "rd")
+            if nid:
+                self.sid = nid
+                self.rec_mode = ""
+                self._mk_agent(sid=self.sid)
+                _p(f"Đã fork session → {nid} (lịch sử được giữ, rẽ nhánh từ đây).", "gr")
         elif cmd == "/new":
             self.sid = sessions.new()
             self._mk_agent(sid=self.sid)
@@ -1420,12 +2229,263 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 _p(f"Đã thêm key {k[:10]}... ({len(groq.keys())} keys tổng)", "gr")
             else:
                 _p("Thêm key thất bại.", "rd")
+        elif cmd == "/connect" or cmd.startswith("/connect "):
+            _parg = (parts[1].lower() if len(parts) > 1 else "")
+            _provs = {"1": "groq", "groq": "groq"}
+            if _parg in _provs:
+                _prov = _provs[_parg]
+            else:
+                _p("Chọn provider:", "bold")
+                _p("  1. groq  (được hỗ trợ — dán key gsk_...)", "cy")
+                _p("  (OpenAI/Anthropic/Gemini: sắp có — hiện Remtm chạy trên Groq)", "dim")
+                try:
+                    _sel = input("Số hoặc tên [1]: ").strip().lower() or "1"
+                except Exception:
+                    return True
+                _prov = _provs.get(_sel, "")
+                if not _prov:
+                    _p("Provider chưa được hỗ trợ.", "ye")
+                    return True
+            try:
+                _k = input("Dán API key: ").strip()
+            except Exception:
+                return True
+            if not _k:
+                _p("(trống — không thêm)", "dim")
+            elif groq.add_key(_k):
+                _p(f"Đã kết nối {_prov} ({len(groq.keys())} keys tổng).", "gr")
+            else:
+                _p("Key không hợp lệ.", "rd")
         elif cmd == "/export":
-            self._export()
-        elif cmd == "/exit" or cmd == "/quit":
+            self._export(open_editor=True)
+        elif cmd == "/keybinds":
+            _p("\n".join([
+                "Phím tắt Remtm (tương đương opencode ctrl+x leader):",
+                "  Tab        chuyển agent PLAN ↔ BUILD (khi dòng trống)",
+                "  ESC        dừng agent đang chạy (mềm) · ESC×2 dừng cứng",
+                "  Ctrl+C     ngắt dòng / thoát khi rảnh · Ctrl+D thoát khi dòng trống",
+                "  ↑/↓        lịch sử lệnh · Backspace xóa",
+                "  /...       lệnh (thay leader ctrl+x): /new=/sessions mới (opencode <leader>n),",
+                "             /compact (<leader>c), /editor (<leader>e), /themes (<leader>t),",
+                "             /models (<leader>m), /undo (<leader>u), /redo (<leader>r),",
+                "             /export (<leader>x), /exit (<leader>q)",
+                "  @file      chèn file · @explore/@general agent con · !cmd bash",
+            ]), "dim")
+        elif cmd == "/undo":
+            try:
+                popped = sessions.undo_last_turn(self.sid)
+            except Exception as e:
+                _p(f"[LOI] undo: {type(e).__name__}: {e}", "rd")
+                popped = []
+            if not popped:
+                _p("(không có gì để undo)", "dim")
+            else:
+                _p(f"Đã undo 1 turn ({len(popped)} tin nhắn). Gõ /redo để khôi phục.", "gr")
+                # Hoàn tác file agent đã đổi trong turn (kiểu opencode, qua git)
+                try:
+                    rfiles, rmsg = sessions.work_undo(self.sid)
+                except Exception as e:
+                    rfiles, rmsg = [], f"{type(e).__name__}: {e}"
+                if rfiles:
+                    _p(f"Đã hoàn tác {len(rfiles)} file:", "ye")
+                    for _rf in rfiles[:15]:
+                        _p(f"  ↩ {_rf}", "dim")
+                    if len(rfiles) > 15:
+                        _p(f"  ... và {len(rfiles) - 15} file nữa", "dim")
+                elif rmsg and "không đổi file" not in rmsg and "không có snapshot" not in rmsg:
+                    _p(f"(file: {rmsg})", "dim")
+        elif cmd == "/redo":
+            try:
+                msgs = sessions.redo_pop(self.sid)
+            except Exception as e:
+                _p(f"[LOI] redo: {type(e).__name__}: {e}", "rd")
+                msgs = []
+            if not msgs:
+                _p("(không có gì để redo)", "dim")
+            else:
+                _p(f"Đã redo {len(msgs)} tin nhắn.", "gr")
+                try:
+                    ok, rmsg = sessions.work_redo(self.sid)
+                except Exception as e:
+                    ok, rmsg = False, f"{type(e).__name__}: {e}"
+                if rmsg and "không có gì" not in rmsg:
+                    _p(f"(file: {rmsg})", "gr" if ok else "ye")
+        elif cmd in ("/compact", "/summarize") or cmd.startswith("/compact ") or cmd.startswith("/summarize "):
+            try:
+                msgs = sessions.load(self.sid)
+                before = sum(len(str(m.get("content") or "")) for m in msgs)
+                new = sessions.compact(self.sid, msgs)
+                after = sum(len(str(m.get("content") or "")) for m in new)
+                try:
+                    if new is not msgs and len(new) != len(msgs) and hasattr(sessions, "_write_all"):
+                        sessions._write_all(self.sid, new)
+                except Exception:
+                    pass
+                _p(f"Đã compact: {before} → {after} ký tự ({len(msgs)} → {len(new)} tin).", "gr")
+            except Exception as e:
+                _p(f"[LOI] compact: {type(e).__name__}: {e}", "rd")
+        elif cmd == "/details" or cmd.startswith("/details "):
+            arg = (parts[1].lower() if len(parts) > 1 else "")
+            if arg in ("on", "1", "true", "bat", "bật"):
+                self.verbose = True
+            elif arg in ("off", "0", "false", "tat", "tắt"):
+                self.verbose = False
+            else:
+                self.verbose = not getattr(self, "verbose", False)
+            try:
+                self._verbose = self.verbose
+            except Exception:
+                pass
+            _p(f"Chi tiết tool: {'BẬT' if self.verbose else 'TẮT'} (khi bật in thêm 3 dòng đầu result).", "gr")
+        elif cmd == "/editor" or cmd.startswith("/editor "):
+            ed = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+            import tempfile as _tf
+            try:
+                with _tf.NamedTemporaryFile(mode="w+", suffix=".md", delete=False, encoding="utf-8") as tf:
+                    tfpath = tf.name
+                try:
+                    subprocess.run([ed, tfpath])
+                except FileNotFoundError:
+                    _p(f"Không mở được $EDITOR='{ed}'. Đặt EDITOR=vi|nano rồi thử lại.", "rd")
+                    try:
+                        os.remove(tfpath)
+                    except Exception:
+                        pass
+                    return True
+                try:
+                    with open(tfpath, encoding="utf-8") as f:
+                        content = f.read().strip()
+                except Exception:
+                    content = ""
+                try:
+                    os.remove(tfpath)
+                except Exception:
+                    pass
+                if content:
+                    try:
+                        content = _expand_mentions(content)
+                    except Exception:
+                        pass
+                    self._send(content)
+                else:
+                    _p("(editor trống — không gửi)", "dim")
+            except Exception as e:
+                _p(f"[LOI] editor: {type(e).__name__}: {e}", "rd")
+        elif cmd == "/themes" or cmd.startswith("/themes ") or cmd == "/theme" or cmd.startswith("/theme "):
+            try:
+                _arg = parts[1] if len(parts) > 1 else ""
+                if not _arg:
+                    names = themes.list_themes()
+                    cur = themes.current_theme()
+                    for n in names:
+                        mark = "*" if n == cur else " "
+                        _p(f"{mark} {n}", "cy" if n == cur else "dim")
+                    _p("Gõ /theme <tên> để chuyển.", "dim")
+                else:
+                    if themes.save_tui({"theme": _arg}):
+                        try:
+                            _patch = themes.apply(_arg)
+                            if isinstance(_patch, dict):
+                                C.update(_patch)
+                        except Exception:
+                            pass
+                        _p(f"Đã chuyển theme → {_arg}", "gr")
+                    else:
+                        _p(f"[LOI] không lưu được theme '{_arg}'", "rd")
+            except Exception as e:
+                _p(f"[LOI] theme: {type(e).__name__}: {e}", "rd")
+        elif cmd == "/share" or cmd.startswith("/share "):
+            fp = self._export()
+            # opencode copy link share vào clipboard — bản local copy đường dẫn
+            # file export để dán cho người khác.
+            if fp:
+                _copied = False
+                for _cc in (["xclip", "-selection", "clipboard"],
+                            ["xsel", "--clipboard", "--input"]):
+                    try:
+                        _r = subprocess.run(_cc, input=fp, capture_output=True,
+                                            text=True, timeout=5)
+                        if _r.returncode == 0:
+                            _copied = True
+                            break
+                    except Exception:
+                        continue
+                if _copied:
+                    _p(f"Đã copy đường dẫn share vào clipboard: {fp}", "gr")
+                else:
+                    _p(f"(chưa copy được clipboard — thiếu xclip/xsel; file ở {fp})", "dim")
+            else:
+                _p("(stub local — chưa upload mạng, file ở ~/.rem_ai/exports/)", "dim")
+        elif cmd == "/unshare" or cmd.startswith("/unshare "):
+            _p("(stub local — chưa có link mạng để gỡ, file export vẫn ở ~/.rem_ai/exports/)", "dim")
+        elif cmd == "/import" or cmd.startswith("/import "):
+            if len(parts) < 2:
+                _p("Cú pháp: /import <file>  (JSON session opencode-style hoặc JSONL Rem)", "dim")
+            else:
+                fp = os.path.expanduser(parts[1])
+                if not os.path.isfile(fp):
+                    _p(f"Không thấy file: {fp}", "rd")
+                else:
+                    try:
+                        imported = _import_session_file(fp)
+                        cnt = 0
+                        for m in imported:
+                            try:
+                                sessions.append(self.sid, m)
+                                cnt += 1
+                            except Exception:
+                                continue
+                        _p(f"Đã import {cnt} tin nhắn từ {fp} vào session hiện tại.", "gr")
+                    except Exception as e:
+                        _p(f"[LOI] import: {type(e).__name__}: {e}", "rd")
+        elif cmd == "/voice" or cmd.startswith("/voice "):
+            _varg = cmd[len("/voice"):].strip()
+            _vlow = _varg.lower()
+            try:
+                if not _varg or _vlow in ("status", "stt", "mic", "check"):
+                    _p(self.manager.call("voice_status", {}, timeout=30), "gr")
+                elif _vlow.startswith("nghe"):
+                    _sec = 6
+                    try:
+                        for _tok in _varg.split()[1:]:
+                            _n = int("".join(c for c in _tok if c.isdigit()) or "0")
+                            if 1 <= _n <= 30:
+                                _sec = _n
+                                break
+                    except Exception:
+                        pass
+                    _p(f"🎤 Đang nghe {_sec}s — nói đi (bắt đầu bằng 'Rem ơi')...", "ye")
+                    _heard = self.manager.call("voice_cmd", {"seconds": _sec}, timeout=60)
+                    _p(_heard, "cy")
+                    if not _heard.startswith("[LOI]"):
+                        _m = re.search(r"Lệnh thoại \([^)]*\):\s*(.+?)(\n\[XÁC NHẬN\])?\s*$", _heard, re.S)
+                        _txt = (_m.group(1).strip() if _m else "").strip()
+                        if _txt:
+                            self._send(_txt)
+                elif _vlow.startswith("nói ") or _vlow.startswith("noi "):
+                    _txt = _varg.split(" ", 1)[1].strip() if " " in _varg else ""
+                    if not _txt:
+                        _p("Cú pháp: /voice nói <nội dung cần đọc>", "dim")
+                    else:
+                        _p(self.manager.call("voice_say", {"text": _txt[:2000]}, timeout=60), "gr")
+                else:
+                    # /voice <lệnh thoại gõ tay> → gửi thẳng cho agent
+                    self._send(_varg)
+            except Exception as e:
+                _p(f"[LOI] voice: {type(e).__name__}: {e} (cài: pip install -r requirements-voice.txt)", "rd")
+        elif cmd in ("/exit", "/quit", "/q"):
             return False
         else:
             if cmd.startswith("/"):
+                # Custom commands trước (/*.md), rồi mới gợi ý/báo lạ
+                try:
+                    _frag0 = cmd.split()[0]
+                    _cname = _frag0[1:]
+                    _carg = cmd[len(_frag0):].strip()
+                    if _cname and self._run_custom(_cname, _carg):
+                        return True
+                except Exception:
+                    pass
                 frag = cmd.split()[0]
                 sug = [s for s in _SLASH if s.startswith(frag) and s != frag][:5]
                 if len(sug) == 1:
@@ -1468,9 +2528,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             kpill = C["rd"] + f"{nkeys} keys" + C["reset"]
             kplain = f"{nkeys} keys"
         rows = [
-            (f"model  {C['cy']}{model}{C['reset']}", f"model  {model}"),
-            (f"dir    {C['wh']}{cwd}{C['reset']}", f"dir    {cwd}"),
-            (f"chat   {C['dim']}{self.sid}{C['reset']} · {kpill}", f"chat   {self.sid} · {kplain}"),
+            (f"model  {C['cy']}{model}{C['reset']} · {kpill}", f"model  {model} · {kplain}"),
+            (f"dir    {C['dim']}{cwd}{C['reset']} · chat {C['dim']}{self.sid}{C['reset']}", f"dir    {cwd} · chat {self.sid}"),
         ]
         print(top)
         for rendered, plain in rows:
@@ -1485,7 +2544,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             tw = render.term_width()
         except Exception:
             tw = 90
-        left = "↵ send · / for commands · esc interrupt"
+        left = "↵ send · / for commands · @ file · ! bash · esc interrupt"
         try:
             ms = groq.chat_models()
             mshort = (ms[0].split("/")[-1] if ms else "?")[:18]
@@ -1513,17 +2572,22 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             lv = 0
         rec = (C["rd"] + "⏺ REC " + C["reset"]) if self.rec_mode else ""
         live = (C["ye"] + f"📥{lv} " + C["reset"]) if lv else ""
-        card_top = (C["dim"] + "╭─ type a message · / for commands · /rec macro"
+        card_top = (C["dim"] + "╭─ type a message · / for commands · @ file · ! bash"
                     + C["reset"] + "\n")
+        try:
+            _pill = (C["ye"] + "[plan]" + C["reset"] if getattr(self, "presets", "build") == "plan"
+                     else C["gr"] + "[build]" + C["reset"])
+        except Exception:
+            _pill = "[build]"
         if self._busy:
             top = (C["dim"] + "╭─ running — type to steer · esc to interrupt"
                    + C["reset"] + "\n")
-            return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
+            return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"] + _pill + " "
         if self._pending:
             top = (C["dim"] + f"╭─ queued ({self._pending}) — waiting"
                    + C["reset"] + "\n")
-            return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"]
-        return card_top + rec + live + C["bold"] + C["cy"] + "╰─❯ " + C["reset"]
+            return top + rec + live + C["bold"] + C["cy"] + "⏳ ❯ " + C["reset"] + _pill + " "
+        return card_top + rec + live + C["bold"] + C["cy"] + "╰─❯ " + C["reset"] + _pill + " "
 
     def run(self):
         self._clear()
@@ -1535,13 +2599,11 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             except Exception:
                 pass
             _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
-            _p(f"Đoạn chat mới: {self.sid} (lịch sử trống — không dính chuyện cũ)", "gr")
             try:
                 self._header_box()
             except Exception:
                 pass
-            _p("Gõ /list để xem macro/skill/chat cũ (chọn số để mở) | /rec để ghi thao tác", "dim")
-            _p("Đang khởi chạy extensions...", "dim")
+            _p("/list macro/skill/chat cũ · /rec ghi thao tác · Tab chuyển plan/build", "dim")
         else:
             try:
                 self._header_box()
@@ -1566,6 +2628,11 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     line = self._input_line(self._prompt_hint()).strip()
                 finally:
                     self._in_input = False
+                    try:
+                        if line.strip():
+                            self._hist_push(line.strip())
+                    except Exception:
+                        pass
             except EOFError:
                 self._in_input = False
                 _p("\nTạm biệt!", "dim")
@@ -1586,6 +2653,31 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     self.q.put(("quit", None))
                     break
                 continue
+            # `!cmd` → bash trực tiếp qua manager (không qua LLM)
+            if line.startswith("!"):
+                try:
+                    self._run_bang(line)
+                except Exception as e:
+                    _p(f"[LOI] bash: {e}", "rd")
+                continue
+            # `@file` → fuzzy tìm file, chèn ~2000 ký tự vào prompt gửi agent
+            try:
+                if "@" in line:
+                    line = _expand_mentions(line)
+            except Exception:
+                pass
+            # `@agent` kiểu opencode: @explore/@general gọi agent con (không ngập
+            # context chính), @plan/@build chuyển preset cho tin này.
+            try:
+                if "@" in line:
+                    _nl = self._run_agent_mention(line)
+                    if _nl is None:
+                        continue
+                    line = _nl
+                    if not line.strip():
+                        continue
+            except Exception:
+                pass
             # Gõ số trần = mở mục trong /list gần nhất (vd "2" mở mục số 2)
             if re.fullmatch(r"\d+", line):
                 if self._list_items:
@@ -1634,7 +2726,7 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                         sys.stdout.write("\r")
                     except Exception:
                         sys.stdout.write("\n")
-                    sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + C["wh"] + line + C["reset"] + "\n")
+                    sys.stdout.write(C["lm"] + C["bold"] + "User" + C["reset"] + C["lm"] + "> " + C["reset"] + line + "\n")
                     sys.stdout.flush()
             except Exception:
                 _p("User> " + line, "lm")

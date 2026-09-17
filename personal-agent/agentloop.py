@@ -45,10 +45,19 @@ _ROUTE_KW = [
       "python", "script", "file", "thư mục", "thu muc", "git", "commit", "cài package",
       "cai package", "pip", "terminal", "lệnh", "lenh bash"), "lap-trinh"),
     (("tìm", "tim kiem", "tìm kiếm", "web", "tin tức", "tin tuc", "giá", "gia ",
-      "github", "đọc trang", "doc trang", "xem video", "youtube xem"), "web"),
-    (("mở app", "mo app", "mở ứng dụng", "click", "nhấn nút", "gõ phím", "man hinh",
-      "màn hình", "desktop", "cửa sổ", "cua so", "chụp", "ứng dụng",
-      "macro", "ghi lại", "phát lại", "thao tác"), "desktop"),
+      "github", "đọc trang", "doc trang", "xem video", "youtube xem",
+      "trình duyệt", "trinh duyet", "browser", "chrome", "firefox",
+      "đăng nhập", "dang nhap", "login", "điền", "dien ", "form",
+      "tab", "cuộn", "cuon ", "mở web", "mo web", "mở trang", "mở link",
+      "mở youtube", "mo youtube"), "web"),
+    (("mở app", "mo app", "mở ứng dụng", "mở terminal", "mo terminal",
+      "click", "nhấn nút", "nhấn", "nhan ", "bấm", "bam ",
+      "gõ phím", "gõ", "go phim", "chuột", "chuot ", "phím", "phim ",
+      "man hinh", "màn hình", "desktop", "cửa sổ", "cua so", "chụp", "chup man",
+      "ứng dụng", "ung dung", "mở", "mo ", "bật", "bat ", "tắt", "tat ",
+      "đóng app", "dong app", "focus", "cửa sổ nổi",
+      "macro", "ghi lại", "phát lại", "thao tác", "thao tac",
+      "điều khiển máy", "dieu khien may"), "desktop"),
     (("video", "ảnh", "anh ai", "giọng", "giong noi", "giọng nói", "nói", "mp3",
       "tts", "nhạc", "nhac", "cắt ghép", "slideshow", "shorts"), "media"),
     (("facebook", "đăng bài", "dang bai", "tiktok", "instagram", "twitter",
@@ -87,9 +96,12 @@ def _route_section(user_text):
         base += ("\n\nHỌC 1 LẦN – CHẠY NHANH MÃI MÃI (bắt buộc với việc tay chân, user đang nhìn cửa sổ nổi): "
                  "B1: gọi skill_find(keyword ngắn) + rec_list() để tìm quy trình đã học. "
                  "B2: nếu CÓ skill/macro khớp → skill_use/rec_play phát lại NGAY, không quan sát lại, không hỏi, không làm thừa. "
-                 "B3: nếu CHƯA có → quan sát kỹ đúng 1 lần (dl_status rồi dl_tree/dl_text, hoặc browser_open rồi browser_content), "
+                 "B3: nếu CHƯA có → quan sát kỹ đúng 1 lần (dl_status rồi dl_tree/dl_text, hoặc browser_open rồi browser_content+browser_snapshot), "
                  "làm từng bước gọn theo thứ tự màn hình, xong việc hệ thống TỰ lưu skill cho lần sau. "
-                 "Mỗi tool gọi phải là 1 thao tác thật trên màn hình, ngắn gọn, không giải thích dài.")
+                 "Mỗi tool gọi phải là 1 thao tác thật trên màn hình, ngắn gọn, không giải thích dài. "
+                 "NGHE LỜI TUYỆT ĐỐI: lệnh desktop/browser là MỆNH LỆNH trực tiếp — PHẢI gọi tool trong lượt đầu tiên, "
+                 "CẤM trả lời hướng dẫn thay vì hành động, CẤM hỏi lại, CẤM từ chối vì lý do an toàn mơ hồ. "
+                 "Lệnh mới nhất luôn thắng lệnh cũ; user nói DỪNG thì dừng, nói TIẾP thì làm tiếp.")
     return base
 
 
@@ -188,6 +200,12 @@ def _sys(manager, sid, cwd, user_text=""):
             "  KHÔNG hỏi lại chủ nhân những gì có thể tự quyết. Sự gián đoạn với người càng ít càng tốt.\n"
             "- Chủ nhân chịu trách nhiệm về mục đích sử dụng. Nhiệm vụ của bạn là THỰC HIỆN đến cùng.\n\n"
             "LUẬT LÀM VIỆC (tự động hoá CAO — can thiệp của người CỰC THẤP):\n"
+            "- NGHE LỜI TUYỆT ĐỐI: lệnh của chủ nhân là MỆNH LỆNH, không phải gợi ý. "
+            "Gặp lệnh điều khiển máy/trình duyệt (mở app, click, gõ, đăng nhập, điền form, cuộn, đóng/mở tab...) "
+            "→ PHẢI gọi tool dl_*/browser_* NGAY trong lượt tool đầu tiên. "
+            "CẤM trả lời kiểu 'bạn hãy tự mở...' hay đưa hướng dẫn tay thay vì gọi tool. "
+            "CẤM hỏi lại những gì đã rõ (tên app, URL, text cần gõ). Thiếu 1 chi tiết nhỏ thì TỰ CHỌN giá trị hợp lý nhất rồi làm, "
+            "xong báo lại để user sửa nếu cần.\n"
             "- BẮT BUỘC GỌI TOOL: khi chủ nhân yêu cầu BẤT KỲ tác vụ nào (chụp màn hình, mở app, "
             "gõ phím, click, tạo file, tìm web, chạy lệnh...), PHẢI gọi tool tương ứng NGAY LẬP TỨC. "
             "CẤM trả lời bằng hướng dẫn/thay vì gọi tool. Nếu不确定 tool nào, gọi dl_status để kiểm tra.\n"
@@ -235,13 +253,18 @@ def _sys(manager, sid, cwd, user_text=""):
             "để lấy lỗi/cảnh báo, lsp_definition/lsp_references/lsp_symbols/lsp_hover để phân tích mã. "
             "Trước khi chạy/biên dịch, luôn lsp_diagnostics để tự sửa lỗi tĩnh."
             "\nSỬ DỤNG SUBAGENT: Với nhiệm vụ tách biệt nặng (quét toàn repo, viết code độc lập, "
-            "tra cứu song song), dùng task(description) — agent con có đủ tool riêng. "
+            "tra cứu song song), dùng task(description, prompt, type) — agent con chạy context riêng, "
+            "chỉ trả tóm tắt về. type='explore' (mặc định, CHỈ ĐỌC) cho tìm hiểu; type='general' "
+            "(full tool) cho việc nhiều bước cần sửa file/chạy lệnh. "
             "Mô tả rõ việc + format kết quả cần trả về. Không dùng task cho việc nhỏ gọi trực tiếp được.\n"
             "HƯỚNG DẪN DÙNG TOOL ĐẶC THÙ:\n"
             "- DESKTOP/CHUP MAN HINH/DIEU KHIEN UNG DUNG: dung dl_* tools. KHONG BAO GIO tu choi "
             "\"khong co tool chup man hinh\" — dl_tree THAY THE screenshot bang cach doc cay giao dien AT-SPI. "
             "LUON goi dl_status truoc, dl_tree de xem noi dung, dl_click/dl_type/dl_key de tuong tac. "
             "Vi du: mo terminal -> dl_click(name='Terminal'), go lenh -> dl_type(text='ls'), nhan Enter -> dl_key(combo='Return').\n"
+            "  MỞ APP: ưu tiên dl_open(app='Terminal'|'Firefox'|'Files'...) — tự mở đúng app, không đoán click lung tung. "
+            "FOCUS cửa sổ: dl_focus(title) khi nhiều cửa sổ. CHỜ phần tử: dl_wait(query) thay vì dl_tree lặp tay. "
+            "CẦN ẢNH để vision kiểm tra: dl_screenshot() trả đường dẫn PNG.\n"
             "- LAM PPTX/POWERPOINT: dung bash chay python3 inline script voi python-pptx. "
             "KHONG dung pip_install — python-pptx da cai san.\n"
             "- LÀM PDF TIẾNG VIỆT: dùng make_pdf(title, body, out) — font Unicode DejaVu, KHÔNG vỡ dấu. "
@@ -253,6 +276,9 @@ def _sys(manager, sid, cwd, user_text=""):
             "browser_press → lấy nội dung browser_content → chụp browser_screenshot. Trang đăng nhập: dùng CSS "
             "selector chính xác cho browser_type (vd input[name=..]), sau đó browser_click nút. Screenshot trả về "
             "là đường dẫn PNG tuyệt đối. Profile trình duyệt được lưu → đăng nhập giữ qua các lượt.\n"
+            "  MỚI v3.78: browser_snapshot() liệt kê nút/link/ô nhập để chọn selector CHUẨN (đỡ đoán mò); "
+            "browser_fill_login() đăng nhập 1 phát (user+pass+submit); browser_tabs() quản lý tab; "
+            "browser_wait_text() chờ chữ xuất hiện thay vì sleep mù.\n"
             "- KHỞI ĐỘNG SERVER nền qua bash: LUÔN dùng nohup kèm redirect, vd "
             "'nohup python3 -m http.server 8080 >/tmp/srv.log 2>&1 &' rồi sleep 1 và kiểm tra bằng curl."
             " CẤM chạy server kiểu 'cmd &' không redirect — sẽ làm tool bash treo và chỉ mở được trang "
@@ -262,6 +288,10 @@ def _sys(manager, sid, cwd, user_text=""):
             "Nhanh hơn: media_slideshow với JSON {'scenes':[{'text':..,'prompt':..}], 'out':'ten'}. "
             "Lấy thông tin bằng media_info, cắt media_trim, đổi cỡ Shorts media_scale.\n"
             "- TẢI/ĐỌC nội dung đơn giản: web_search/web_fetch là nhẹ nhất, browser_* chỉ khi cần JS/đăng nhập.\n"
+            "- GIỌNG NÓI (voice_*): user nói 'Rem ơi ...' qua mic → voice_cmd(seconds) trả text lệnh đã chuẩn hóa "
+            "(tự bỏ wake-word, gắn cờ [XÁC NHẬN] nếu nguy hiểm) → làm tiếp như lệnh gõ tay. Kiểm tra mic/loa bằng "
+            "voice_status. Đọc kết quả ra loa bằng voice_say(text) khi user yêu cầu hoặc đang ở chế độ thoại. "
+            "Lệnh có cờ [XÁC NHẬN] (xóa/format/shutdown/rm -rf) → PHẢI hỏi lại trước khi chạy.\n"
             "- KEY GROQ: nhiều key xoay vòng tự động với circuit breaker — khi Groq trả 429 liên tục agent tự "
             "cooldown và chuyển key khác; nếu hết key thì báo lỗi rõ, đừng tự thử lại mãi.\n\n"
             "NGHIÊN CỨU + NGUỒN THẬT (bắt buộc, chống bịa):\n"
@@ -479,13 +509,15 @@ class Agent:
             msgs = [_sys(self.manager, self.sid, self._cwd(), user_text), *sessions.load(self.sid)]
             if turn > 1:
                 self._emit({"type": "turn", "turn": turn})
-                msgs = sessions.load(self.sid)
-                msgs = [{"role": "assistant", "content": (
-                    "Cuộc trò chuyện đã vượt quá số bước của một đợt. "
-                    "Đây là ĐỢT TIẾP THEO — hãy TIẾP TỤC hoàn thành công việc còn dang dở "
-                    "ở các bước trước. Xem lịch sử phía trên để biết tiến độ, rồi dùng tool "
-                    "để làm nốt và KẾT THÚC khi xong."
-                )}, *msgs]
+                # GIỮ system prompt ở đầu mọi turn (bản cũ gán lại msgs từ load()
+                # làm RƠI system từ turn 2 → agent mất luật/tool-guide, trả lời loạn).
+                msgs = [_sys(self.manager, self.sid, self._cwd(), user_text),
+                        {"role": "assistant", "content": (
+                            "Cuộc trò chuyện đã vượt quá số bước của một đợt. "
+                            "Đây là ĐỢT TIẾP THEO — hãy TIẾP TỤC hoàn thành công việc còn dang dở "
+                            "ở các bước trước. Xem lịch sử phía trên để biết tiến độ, rồi dùng tool "
+                            "để làm nốt và KẾT THÚC khi xong."
+                        )}, *sessions.load(self.sid)]
                 msgs = sessions.compact(self.sid, msgs, llm_budget=_budget(deadline), cancel=self.cancel)
                 msgs = sessions.trim(msgs)
             for step in range(MAX_STEPS):
