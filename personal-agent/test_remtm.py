@@ -187,7 +187,7 @@ def test_opencode_parity():
     check("slash /keybinds", "/keybinds" in repl._SLASH)
     src = open("repl.py", encoding="utf-8").read()
     check("Tab vẽ lại cùng dòng (không \\n riêng)",
-          '_redraw_input_locked(self)' in src and '"\\n")' not in src.split('ch == "\\t"')[1].split("if o < 32")[0] if 'ch == "\\t"' in src else False)
+          '_redraw_input_locked(self)' in src and '"\\n")' not in src.split('ch == "\\t"')[1].split('ch == "\\x1b"')[0] if 'ch == "\\t"' in src else False)
     check("prompt có pill agent", "[build]" in src and "[plan]" in src)
     check("history ↑/↓", "_hist_push" in src and '"[A"' in src and '"[B"' in src)
     check("@agent mentions", repl._AGENT_MENTIONS >= {"explore", "general", "plan", "build"})
@@ -325,6 +325,30 @@ def test_context_hardening():
         check("system mọi turn", False, f"{type(e).__name__}: {e}")
 
 
+def test_no_real_keys_in_repo():
+    print("[10] không key Groq thật trong repo (chống lộ key khi push)")
+    import re, subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        out = subprocess.check_output(["git", "-C", root, "ls-files"], text=True, timeout=15)
+        files = [os.path.join(root, f) for f in out.split()]
+    except Exception as e:
+        check("git ls-files", False, str(e)[:80])
+        return
+    bad = []
+    for fp in files:
+        if os.path.isdir(fp):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8", errors="strict") as f:
+                txt = f.read(200000)
+        except Exception:
+            continue  # file nhị phân → bỏ qua
+        for m in re.findall(r"gsk_[A-Za-z0-9]{20,}", txt):
+            bad.append(f"{os.path.relpath(fp, root)}:{m[:12]}...")
+    check("repo sạch key thật", not bad, str(bad[:3]))
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -345,6 +369,7 @@ def main():
         test_rec_stop_empty()
         test_opencode_parity()
         test_context_hardening()
+        test_no_real_keys_in_repo()
         print(f"--> lượt {rnd}: {PASS} pass, {FAIL} fail")
         total_fail += FAIL
     print(f"TỔNG: {total_fail} fail sau {args.loop} lượt")

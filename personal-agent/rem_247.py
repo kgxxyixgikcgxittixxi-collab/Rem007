@@ -12,7 +12,7 @@ import sys, os, time, signal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-import groq
+from providers import groq
 from arch import orchestrator, init_arch, get_pool_stats, Watchdog
 from social_auto import run_social_cycle, get_daily_report
 

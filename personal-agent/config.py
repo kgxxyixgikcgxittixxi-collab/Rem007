@@ -8,7 +8,7 @@ WIN = PF.system() == "Windows"
 MAC = PF.system() == "Darwin"
 PC = not TERMUX
 NAME = "Rem Agent"
-VERSION = "3.84"
+VERSION = "3.85"
 
 LOGO = r"""
  ____  _____ __  __ 
@@ -18,17 +18,62 @@ LOGO = r"""
 |_| \_\_____|_|  |_|
 """
 DEBUG = os.environ.get("REM_DEBUG", "0") == "1"
+
+# ── Bảng màu giao diện (REPL). Đổi lúc chạy bằng /theme <tên>.
+# Mỗi theme map tên màu → mã ANSI; code chỉ dùng khóa qua C[] nên đổi theme
+# là đổi mã ngay không cần sửa UI. Xem tổng hợp bởi repl._apply_theme_c().
+THEMES = {
+    "default": {
+        "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
+        "cy": "\033[96m", "gr": "\033[92m", "ye": "\033[93m",
+        "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
+        "lm": "\033[92m", "ob": "\033[34m", "wh": "\033[37m",
+        "clear": "\033[2J", "home": "\033[H",
+    },
+    "ocean": {
+        "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
+        "cy": "\033[36m", "gr": "\033[32m", "ye": "\033[33m",
+        "rd": "\033[91m", "mg": "\033[35m", "bl": "\033[34m",
+        "lm": "\033[92m", "ob": "\033[36m", "wh": "\033[97m",
+        "clear": "\033[2J", "home": "\033[H",
+    },
+    "sunset": {
+        "reset": "\033[0m", "dim": "\033[90m", "bold": "\033[1m",
+        "cy": "\033[93m", "gr": "\033[92m", "ye": "\033[33m",
+        "rd": "\033[91m", "mg": "\033[95m", "bl": "\033[94m",
+        "lm": "\033[92m", "ob": "\033[95m", "wh": "\033[37m",
+        "clear": "\033[2J", "home": "\033[H",
+    },
+    "mono": {
+        "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
+        "cy": "\033[37m", "gr": "\033[37m", "ye": "\033[37m",
+        "rd": "\033[37m", "mg": "\033[37m", "bl": "\033[37m",
+        "lm": "\033[37m", "ob": "\033[37m", "wh": "\033[37m",
+        "clear": "\033[2J", "home": "\033[H",
+    },
+}
+REPL_THEME = os.environ.get("REM_THEME", "default")
+# theme đã đổi bằng /theme giữa phiên → ưu tiên file đã lưu
+try:
+    with open(os.path.join(DIR, "rem_theme"), "r", encoding="utf-8") as _f:
+        _saved = _f.read().strip()
+    if _saved:
+        REPL_THEME = _saved
+except Exception:
+    pass
+if REPL_THEME not in THEMES:
+    REPL_THEME = "default"
 MODEL_CHAT = "openai/gpt-oss-120b"
 MODEL_CLONE = "openai/gpt-oss-120b"
 MODEL_VISION = "meta-llama/llama-3.2-11b-vision-instruct"
-MODEL_FB = ["openai/gpt-oss-20b", "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct"]
+MODEL_FB = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
 MODEL_PREF_CHAT = [
     "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-    "qwen/qwen3-8b",
+    "qwen/qwen3.6-27b",
 ]
 MODEL_PREF_CLONE = [
     "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
-    "qwen/qwen3-8b",
+    "qwen/qwen3.6-27b",
 ]
 MODEL_PREF_VISION = [
     "meta-llama/llama-3.2-11b-vision-instruct", "openai/gpt-oss-120b",
@@ -36,29 +81,33 @@ MODEL_PREF_VISION = [
 ]
 MODEL_PREF_FB = [
     "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b",
-    "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-8b",
+    "qwen/qwen3.6-27b",
     "groq/compound", "groq/compound-mini",
 ]
 
-# ── Multi-key Architecture ──────────────────────────────────────────
+# ── Multi-key Architecture (NGUỒN DUY NHẤT — arch.py dùng chung dict này,
+# không copy riêng để khỏi lệch cấu hình) ──────────────────────────
 KEY_POOLS = {
     "main": {
         "purpose": "Chat, coding, web search, general tasks",
         "model_pref": MODEL_PREF_CHAT,
         "budget": 120,
         "max_concurrent": 4,
+        "timeout": 90,
     },
     "media": {
         "purpose": "TTS, image generation, video processing",
         "model_pref": MODEL_PREF_VISION,
         "budget": 300,
         "max_concurrent": 2,
+        "timeout": 180,
     },
     "desktop": {
         "purpose": "Desktop control, browser automation",
         "model_pref": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
         "budget": 60,
         "max_concurrent": 2,
+        "timeout": 60,
     },
 }
 

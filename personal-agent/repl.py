@@ -192,6 +192,41 @@ P_USER = "\033[92mUser>\033[0m "      # xanh lá chuối (chỉ tiền tố, n�
 P_AGENT = "\033[1m\033[96m❯\033[0m "       # kiểu opencode: dấu ❯ nổi bật
 T = 0.015
 CLEAR_SEQ = C["clear"] + C["home"]
+
+# ── Theme engine (đồng bộ dict C[] với config.THEMES[config.REPL_THEME]) ──
+_THEMES_PATH = os.path.join(config.DIR, "rem_theme")
+def _apply_theme_c():
+    theme = getattr(config, "REPL_THEME", "default") or "default"
+    C.update(config.THEMES.get(theme, config.THEMES.get("default", {})))
+    try:
+        with open(_THEMES_PATH, "w", encoding="utf-8") as f:
+            f.write(theme)
+    except Exception:
+        pass
+def _init_history():
+    """Tải history gần nhất từ file (giữ ≤150 dòng) để Tab/Up recall."""
+    hist = getattr(_init_history, "_hist", [])
+    try:
+        with open(os.path.join(config.DIR, "input_history"), "r", encoding="utf-8") as f:
+            hist[:] = [ln.rstrip("\n") for ln in f if ln.strip()][-150:]
+    except Exception:
+        pass
+    _init_history._hist = hist
+    return hist
+def _save_history(line):
+    hist = getattr(_init_history, "_hist", [])
+    hist.append(line)
+    try:
+        with open(os.path.join(config.DIR, "input_history"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+try:
+    _apply_theme_c()
+    _init_history()
+except Exception:
+    pass
 # Số lần TỰ ĐỘNG chạy tiếp tối đa khi 1 lượt bị cắt giữa chừng (hết giờ/quota/bước)
 # Cao để chạy 24/7: mỗi lượt được quyền tối đa MAX_TASK_SECONDS, tổng lên tới ~40 phút/task.
 AUTO_RESUME_MAX = 8
@@ -241,15 +276,8 @@ _TOOL_LABEL = {
 MACRO_CATS_FALLBACK = ("van-phong", "trinh-duyet", "he-thong", "giai-tri",
                        "mang-xa-hoi", "khac")
 
-# Registry lệnh / để gợi ý khi gõ sai/gõ dở (kiểu autocomplete opencode)
-_SLASH = ["/help", "/list", "/rec", "/play", "/resume", "/done", "/clear",
-          "/stop", "/rest", "/models", "/debug", "/think", "/thinking", "/del", "/auto",
-          "/safe", "/status", "/stats", "/sessions", "/continue", "/new", "/rename", "/fork",
-          "/plan", "/build", "/agent",
-          "/lsp", "/mcp", "/init", "/keys", "/key", "/connect", "/checkupdate", "/update",
-          "/overlay", "/exit", "/quit", "/q", "/export", "/keybinds",
-          "/undo", "/redo", "/compact", "/summarize", "/details", "/editor",
-          "/themes", "/theme", "/share", "/unshare", "/import", "/voice"]
+# Registry lệnh / TẬP TRUNG 1 nơi (xem _SLASH_CAT bên dưới: vừa autocomplete,
+# vừa catalog cho /palette và /help nhóm theo mục).
 
 
 def _attention_notify(title="Rem xong việc", msg=""):
@@ -543,6 +571,87 @@ def _import_session_file(fp):
     return msgs
 
 
+# Registry lệnh / để gợi ý khi gõ sai/gõ dở (kiểu autocomplete opencode).
+# Tập trung 1 nơi: vừa làm dữ liệu autocomplete, vừa làm CATALOG cho /palette
+# và /help nhóm theo mục — khỏi sửa 3 chỗ khi thêm lệnh mới.
+# (name, category, desc, args_hint, aliases)
+_SLASH_CAT = {
+    "/help":         ("Cơ bản", "/help hiển thị danh sách lệnh này", "", ("/?",)),
+    "/list":         ("Cơ bản", "Liệt kê macro/skill/chat cũ — gõ số để mở", "[số]", ("/ls",)),
+    "/rec":          ("Điều khiển", "Ghi thao tác desktop thành macro", "", ()),
+    "/play":         ("Điều khiển", "Phát lại macro đã ghi", "<số>", ()),
+    "/resume":       ("Lịch sử", "Mở lại đoạn chat cũ", "<số>", ("/open",)),
+    "/done":         ("Điều khiển", "Dừng ghi macro & lưu", "", ()),
+    "/clear":        ("Cơ bản", "Xoá màn hình (hiện logo REM)", "", ()),
+    "/stop":         ("Điều khiển", "Dừng agent đang xử lý (giữ session)", "", ()) ,
+    "/rest":         ("Hệ thống", "Hẹn máy tự ngủ sau N phút", "N", ()),
+    "/models":       ("Hệ thống", "Xem model đang dùng (chat/compact)", "", ()),
+    "/debug":        ("Hệ thống", "Bật/tắt chế độ gỡ lỗi", "", ("/dbg",)),
+    "/think":        ("Hiển thị", "Xem đầy đủ suy luận lần trả lời cuối", "", ("/rx",)),
+    "/thinking":     ("Hiển thị", "Hiện/ẩn khối suy luận khi trả lời", "[on|off]", ()),
+    "/effort":       ("Cấu hình", "Đổi mức suy luận low|medium|high", "low|medium|high", ()),
+    "/del":          ("Lịch sử", "Xoá 1 session cũ", "<id>", ()),
+    "/auto":         ("Quyền hạn", "Tự động — không hỏi xác nhận", "", ()),
+    "/safe":         ("Quyền hạn", "Hỏi xác nhận trước tool ghi/bash/fetch", "", ()),
+    "/status":       ("Hiển thị", "Xem extension + tool + session", "", ()) ,
+    "/stats":        ("Hiển thị", "Thống kê dùng: tin nhắn, tool, token", "", ()) ,
+    "/todos":        ("Hiển thị", "Xem danh sách công việc (todo) agent đang theo dõi", "", ("/todo",)),
+    "/compact":      ("Cấu hình", "Nén quy mô context thủ công (tóm tắt lịch sử cũ)", "", ("/summarize",)) ,
+    "/summarize":    ("Cấu hình", "Ép tóm tắt context ngay (như /compact)", "", ()),
+    "/model":        ("Cấu hình", "Chọn model chat cho phiên này", "<tên>", ("/m",)) ,
+    "/sessions":     ("Lịch sử", "Liệt kê tất cả session cũ", "", ()),
+    "/continue":     ("Lịch sử", "Tiếp tục session cũ", "<id>", ()),
+    "/rename":       ("Lịch sử", "Đặt tên session hiện tại", "<tên>", ()),
+    "/fork":         ("Lịch sử", "Nhân bản session hiện tại thành mới", "", ()),
+    "/undo":         ("Lịch sử", "Lùi 1 turn (kèm hoàn tác file, cần git)", "", ()),
+    "/redo":         ("Lịch sử", "Làm lại turn vừa undo (kèm file)", "", ()),
+    "/new":          ("Cơ bản", "Tạo session mới", "", ()),
+    "/palette":      ("Cơ bản", "Bảng lệnh tìm nhanh (giống opencode command palette)", "", ()) ,
+    "/theme":        ("Cấu hình", "Đổi bảng màu giao diện", "tên (nhập trống để xem)", ("/themes",)),
+    "/details":      ("Hiển thị", "Bật/tắt chi tiết tool (3 dòng đầu result)", "[on|off]", ()),
+    "/plan":         ("Quyền hạn", "Chuyển preset PLAN (chỉ đọc)", "", ()),
+    "/build":        ("Quyền hạn", "Quay lại preset BUILD", "", ("/agent",)),
+    "/lsp":          ("Phát triển", "Kiểm tra lỗi file nguồn (clangd/pylsp)", "<file>", ()) ,
+    "/mcp":          ("Hệ thống", "Xem / nạp lại MCP server ngoài", "reload", ()),
+    "/init":         ("Cơ bản", "Tạo AGENTS.md cho thư mục đang làm việc", "", ()),
+    "/keys":         ("Cấu hình", "Xem số Groq keys", "", ()),
+    "/key":          ("Cấu hình", "Thêm Groq key", "gsk_...", ()),
+    "/connect":      ("Cấu hình", "Thêm provider/key (chọn Groq, dán key)", "", ()),
+    "/checkupdate":  ("Hệ thống", "Kiểm tra bản mới trên GitHub", "", ()),
+    "/update":       ("Hệ thống", "Tự cập nhật bản mới nhất", "", ()),
+    "/overlay":      ("Cấu hình", "Cửa sổ nổi hiện việc đang làm", "on|off|status", ()),
+    "/export":       ("Cơ bản", "Xuất đoạn chat hiện tại ra markdown", "", ()),
+    "/editor":       ("Cơ bản", "Mở $EDITOR soạn tin rồi gửi", "", ()),
+    "/share":        ("Cơ bản", "Export markdown local (~/.rem_ai/exports/)", "", ()),
+    "/unshare":      ("Cơ bản", "Gỡ share local", "", ()),
+    "/import":       ("Cơ bản", "Nhập JSON opencode hoặc JSONL Rem", "<file>", ()),
+    "/voice":        ("Cơ bản", "Mic/STT/TTS tiếng Việt", "[status|nghe|nói|...]", ()),
+    "/keybinds":     ("Cơ bản", "Bảng phím tắt", "", ()),
+    "/q":            ("Cơ bản", "Thoát (như /exit)", "", ()),
+    "/exit":         ("Cơ bản", "Thoát", "", ("/quit",)),
+}
+_SLASH = [cmd for cmd in _SLASH_CAT]
+# autocomplete: gõ dở khớp bất kỳ phần nào của lệnh (fuzzy kiểu palette)
+def _palette_suggest(frag):
+    frag = frag.lower().lstrip("/")
+    if not frag:
+        return []
+    scored = []
+    for cmd, (cat, desc, args, aliases) in _SLASH_CAT.items():
+        keys = [cmd[1:].lower()] + [a[1:].lower() for a in aliases if a.startswith("/")]
+        for k in keys:
+            if frag in k:
+                scored.append((len(k), cmd))
+                break
+            # fuzzy: ký tự fragment xuất hiện đúng thứ tự trong tên lệnh
+            it = iter(k)
+            if all(any(c == f for c in it) for f in frag):
+                scored.append((len(k) + 0.5, cmd))
+                break
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [c for _, c in scored[:8]]
+
+
 def _p(s, col="cy", end="\n"):
     with _OUT_LOCK:
         r = _input_state()
@@ -694,6 +803,8 @@ class Repl:
         self._spin_start = 0.0
         self._spin_on = False
         self._last_out = None
+        self._last_turn_use = {}    # token lượt vừa xong (footer kiểu opencode)
+        self._last_turn_secs = 0.0  # thời gian lượt vừa xong (giây)
         self._tool_rows = []      # các dòng tool đã xong (giống timeline opencode)
         self._cur_title = ""
         self._live_n = 0          # số ký tự model đang soạn (stream) — hiện tiến độ
@@ -897,7 +1008,10 @@ class Repl:
                         sys.stdout.flush()
                     except Exception:
                         pass
-                    return "".join(buf).strip()
+                    _txt = "".join(buf).strip()
+                    if _txt:
+                        _save_history(_txt)
+                    return _txt
                 if ch == "\x03":  # Ctrl+C
                     if buf:
                         # Đang gõ dở → xóa dòng (kiểu opencode), KHÔNG thoát.
@@ -936,6 +1050,65 @@ class Repl:
                             # — không gõ lẻ từng ký tự để khỏi lệch cursor ở mép wrap → dính dòng
                             _erase_input_locked(self)
                             _redraw_input_locked(self)
+                    continue
+                if ch == "\t":  # TAB — autocomplete lệnh / (kiểu opencode)
+                    cur = "".join(buf).strip()
+                    if cur.startswith("/"):
+                        sugs = _palette_suggest(cur.lstrip("/")) or [c for c in _SLASH if c.startswith(cur)]
+                        if sugs:
+                            fill = sugs[0]
+                            if len(sugs) > 1:
+                                # Nhiều khớp → hiện gợi ý bằng _p (xóa/vẽ lại input
+                                # đúng số hàng, không in tay "\n" gây dính chữ).
+                                extra = "   ".join(f"{' '.join(s.split())}" for s in sugs[:4])
+                                _p(extra, "dim")
+                            rm = len(buf)
+                            try:
+                                sys.stdout.write("\b \b" * rm)
+                            except Exception:
+                                pass
+                            buf[:] = list(fill)
+                            sys.stdout.write(fill)
+                            sys.stdout.flush()
+                        continue
+                    # Tab kiểu opencode: dòng trống → chuyển agent PLAN ↔ BUILD.
+                    # Phân biệt paste (còn ký tự chờ sau Tab, hoặc đang gõ dở)
+                    # → chèn spaces giữ nguyên liệu, không chuyển oan.
+                    # VẼ LẠI CÙNG DÒNG (không in dòng mới — pill [plan]/[build]
+                    # trong prompt cho thấy đã chuyển).
+                    try:
+                        _more = bool(_sel.select([fd], [], [], 0.02)[0])
+                    except Exception:
+                        _more = False
+                    if _more or buf:
+                        for _sp in "  ":
+                            buf.append(_sp)
+                            try:
+                                sys.stdout.write(_sp)
+                                sys.stdout.flush()
+                            except Exception:
+                                pass
+                        continue
+                    try:
+                        with _OUT_LOCK:
+                            _erase_input_locked(self)
+                            try:
+                                if getattr(self, "presets", "build") == "plan":
+                                    self._agent.perm = Presets.build()
+                                    self.presets = "build"
+                                else:
+                                    self._agent.perm = Presets.plan()
+                                    self.presets = "plan"
+                            except Exception:
+                                pass
+                            try:
+                                self._input_prompt = self._prompt_hint()
+                            except Exception:
+                                pass
+                            self._hist_i = None
+                            _redraw_input_locked(self)
+                    except Exception:
+                        pass
                     continue
                 if ch == "\x1b":  # ESC — phân biệt ESC lẻ vs phím mũi tên
                     try:
@@ -1033,47 +1206,6 @@ class Repl:
                     o = ord(ch)
                 except Exception:
                     o = 32
-                if ch == "\t":
-                    # Tab kiểu opencode: chuyển agent PLAN ↔ BUILD.
-                    # Phân biệt paste (còn ký tự chờ sau Tab, hoặc đang gõ dở)
-                    # → chèn spaces giữ nguyên liệu, không chuyển oan.
-                    try:
-                        _more = bool(_sel.select([fd], [], [], 0.02)[0])
-                    except Exception:
-                        _more = False
-                    if _more or buf:
-                        for _sp in "  ":
-                            buf.append(_sp)
-                            try:
-                                sys.stdout.write(_sp)
-                                sys.stdout.flush()
-                            except Exception:
-                                pass
-                        continue
-                    # Tab trần khi dòng trống → đổi agent, VẼ LẠI CÙNG DÒNG
-                    # (không in dòng mới — gọn như opencode, pill [plan]/[build]
-                    # trong prompt cho thấy đã chuyển).
-                    try:
-                        with _OUT_LOCK:
-                            _erase_input_locked(self)
-                            try:
-                                if getattr(self, "presets", "build") == "plan":
-                                    self._agent.perm = Presets.build()
-                                    self.presets = "build"
-                                else:
-                                    self._agent.perm = Presets.plan()
-                                    self.presets = "plan"
-                            except Exception:
-                                pass
-                            try:
-                                self._input_prompt = self._prompt_hint()
-                            except Exception:
-                                pass
-                            self._hist_i = None
-                            _redraw_input_locked(self)
-                    except Exception:
-                        pass
-                    continue
                 if o < 32:
                     continue  # bỏ control char khác
                 buf.append(ch)
@@ -1272,6 +1404,7 @@ class Repl:
                 continue
             if kind == "task":
                 self._busy = True
+                _task_t0 = time.time()   # mốc đầu lượt (footer usage kiểu opencode)
                 self._spin_on = True
                 try:
                     self.manager.reset_interrupt()
@@ -1372,6 +1505,11 @@ class Repl:
                     except Exception as e:
                         out = f"[LỖI] {type(e).__name__}: {e}"
                 self._last_out = out
+                try:
+                    self._last_turn_use = groq.take_usage()
+                    self._last_turn_secs = time.time() - _task_t0
+                except Exception:
+                    self._last_turn_use, self._last_turn_secs = {}, 0.0
                 self._spin_on = False
                 self._busy = False
                 spin.join(timeout=1)      # đợi spinner bỏ dòng cuối xong
@@ -1395,6 +1533,16 @@ class Repl:
                         # Body — render markdown sạch (opencode-style)
                         if body.strip():
                             _type(render.md_to_ansi(body), None)
+                        # Footer usage kiểu opencode: token lượt này + tổng phiên.
+                        try:
+                            _u = self._last_turn_use or {}
+                            _t = groq.session_usage()
+                            if _u.get("prompt") or _u.get("completion"):
+                                _p(f"◆ ↑{_u.get('prompt', 0)} ↓{_u.get('completion', 0)} · "
+                                   f"{self._last_turn_secs:.0f}s · "
+                                   f"∑↑{_t.get('prompt', 0)} ↓{_t.get('completion', 0)}", "dim")
+                        except Exception:
+                            pass
                         # Đáp án xong → gợi ý phím tắt kiểu opencode.
                         # KHÔNG in "❯ " tay ở đây — vòng input() kế tiếp sẽ in prompt
                         # (in tay gây double prompt "❯ ❯" và dính chữ như log lỗi).
@@ -1426,9 +1574,14 @@ class Repl:
             mini = str(args)[:120]
             _p(f"  {mini}", "dim")
         try:
-            a = input("  Cho phép? [y/N] ").strip().lower()
+            a = input("  Cho phép? [y/N/a=luôn auto] ").strip().lower()
         except Exception:
             return False
+        if a in ("a", "all", "luon", "auto"):
+            self._agent.perm.set_auto(True)
+            self.presets = "build"
+            _p("  Đã chuyển chế độ TỰ ĐỘNG — không hỏi nữa (xoá bằng /safe).", "gr")
+            return True
         return a in ("y", "yes", "ok", "cho", "phep", "1", "c")
 
     def _status(self):
@@ -1438,7 +1591,21 @@ class Repl:
         except Exception:
             pass
         _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
-        if not groq.keys():
+        # Dòng trạng thái kiểu opencode: model | keys | chế độ | session
+        # (chỉ đọc cache, không gọi mạng để khỏi lag mỗi lần vẽ màn hình)
+        try:
+            _live = (getattr(groq, "_MODELS", {}) or {}).get("items") or set()
+            _model = next((m for m in config.MODEL_PREF_CHAT if m in _live), None) or config.MODEL_CHAT
+        except Exception:
+            _model = "?"
+        try:
+            _nkeys = len(groq.keys())
+        except Exception:
+            _nkeys = 0
+        _auto = self.agent_auto()
+        _mode = "auto" if _auto is True else ("safe" if _auto is False else "?")
+        _p(f"◆ {_model} | {_nkeys} keys | {_mode} | {self.sid}", "cy")
+        if not _nkeys:
             _p("⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
 
     def agent_auto(self):
@@ -1496,6 +1663,153 @@ class Repl:
         if st:
             print(st)
         _p("Thêm key: /key gsk_...   |   /keys reset  để xoá stats đã học", "dim")
+
+    # ── /palette: bảng lệnh tìm nhanh kiểu opencode command palette ──
+    def _palette(self):
+        """Gõ 1 mảnh lệnh → liệt kê lệnh khớp + alias; nhấn số để chạy ngay."""
+        if self._busy:
+            _p("Agent đang bận — đợi hết lượt rồi gõ /palette.", "ye")
+            return
+        try:
+            self._clear_spin_line()
+        except Exception:
+            pass
+        _p("╭─❯ /palette — gõ mảnh lệnh (vd 'stop', 'key'), nhấn số để chạy ngay", "dim")
+        try:
+            q = input("  filter: ").strip().lower().lstrip("/")
+        except Exception:
+            return
+        if not q:
+            matches = _SLASH
+        else:
+            matches = _palette_suggest(q) or [c for c in _SLASH if q in c]
+        if not matches:
+            _p("  (không khớp lệnh nào)", "dim")
+            return
+        for i, c in enumerate(matches[:8], 1):
+            cat, desc, args, aliases = _SLASH_CAT[c]
+            hint = f" {args}" if args else ""
+            alias_txt = ((" (" + ", ".join(a for a in aliases) + ")") if aliases else "")
+            _p(f"  {i}. {C['cy']}{c}{hint}{C['reset']} — {desc}{C['dim']}{alias_txt}{C['reset']}", "dim")
+        _p("  chọn số 1-8 (Enter = thoát), đổi filter để tìm tiếp", "dim")
+        try:
+            n = input("  chọn: ").strip()
+        except Exception:
+            return
+        if n.isdigit() and 1 <= int(n) <= len(matches):
+            self.slash(matches[int(n) - 1])
+
+    # ── /theme: đổi bảng màu giao diện (lưu vào config.REPL_THEME) ──
+    def _theme(self, name):
+        import config as _cfg
+        try:
+            _cfg.REPL_THEME
+        except AttributeError:
+            _p("Không đọc được REPL_THEME (bản cũ config?)", "rd")
+            return
+        if not name:
+            cur = _cfg.REPL_THEME
+            _p(f"Màu hiện tại: '{cur}'", "cy")
+            _p("Chọn: " + " · ".join(f"{C['cy']}{t}{C['reset']}" for t in _cfg.THEMES), "dim")
+            _p("Cách dùng: /theme <tên>   (vd /theme ocean)", "dim")
+            return
+        if name not in _cfg.THEMES:
+            _p(f"Không có theme '{name}'. Có: {', '.join(_cfg.THEMES)}", "ye")
+            return
+        try:
+            _cfg.REPL_THEME = name
+            _apply_theme_c()
+        except Exception as e:
+            _p(f"[LOI] đổi theme: {e}", "rd")
+            return
+        _p(f"Đã đổi sang theme '{name}'.", "gr")
+
+    # ── /todos: danh sách công việc kiểu opencode todo list ──
+    def _todos(self):
+        tpath = os.path.join(config.DIR, "todos", f"{self.sid}.json")
+        try:
+            with open(tpath, "r", encoding="utf-8") as f:
+                todos = json.load(f)
+        except Exception:
+            todos = []
+        if not todos:
+            _p("(chưa có todo — bảo agent 'tạo todo cho việc này' để nó theo dõi tiến độ)", "dim")
+            return
+        icons = {"completed": ("✓", "gr"), "in_progress": ("•", "ye"),
+                 "pending": ("○", "dim"), "cancelled": ("⊘", "dim")}
+        for t in todos:
+            st = t.get("status", "pending")
+            ic, col = icons.get(st, ("○", "dim"))
+            prio = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(t.get("priority", ""), "")
+            _p(f"  {C[col]}{ic}{C['reset']} {prio} {t.get('content', '?')}", "dim")
+        _p(f"({sum(1 for t in todos if t.get('status') == 'completed')}/{len(todos)} xong)", "gr")
+
+    # ── /compact: nén context thủ công (kiểu opencode compact) ──
+    def _compact(self):
+        if self._busy:
+            _p("Agent đang bận — đợi hết lượt rồi gõ /compact.", "ye")
+            return
+        msgs = sessions.load(self.sid)
+        if not msgs:
+            _p("(chưa có lịch sử để nén)", "dim")
+            return
+        before = sum(len(m.get("content") or "") for m in msgs)
+        _p(f"Nén context ({len(msgs)} tin, ~{before} ký tự)...", "ye")
+        out = sessions.compact(self.sid, msgs, budget=0, msg_cap=0, llm_budget=60)
+        after = sum(len(m.get("content") or "") for m in out)
+        try:
+            path = os.path.join(config.DIR, "sessions", f"{self.sid}.jsonl")
+            import tempfile
+            _fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".cmp")
+            with os.fdopen(_fd, "w", encoding="utf-8") as f:
+                for m in out:
+                    f.write(json.dumps(m, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception as e:
+            _p(f"[LOI] không lưu được context nén: {e}", "rd")
+            return
+        self._mk_agent()
+        _p(f"Đã nén: {before} → {after} ký tự ({len(msgs)} → {len(out)} tin).", "gr")
+
+    # ── /model: chọn model chat cho phiên (qua REM_MODEL, persist rem_model) ──
+    def _model_pick(self, arg=""):
+        import config as _cfg
+        try:
+            ms = groq.chat_models() or [m for m in _cfg.MODEL_PREF_CHAT if m]
+        except Exception:
+            ms = list(_cfg.MODEL_PREF_CHAT)
+        _ov = os.environ.get("REM_MODEL", "").strip()
+        try:
+            with open(os.path.join(config.DIR, "rem_model"), encoding="utf-8") as _f:
+                _ov = _ov or _f.read().strip()
+        except Exception:
+            pass
+        if not arg:
+            if _ov:
+                _p(f"Model đang dùng: {_ov}  (gõ /model để xem danh sách, /model <tên> để đổi)", "cy")
+            _p("Danh sách model chat (nhấn /model <tên> để chọn):", "bold")
+            for i, m in enumerate(ms[:12], 1):
+                mark = "→" if m == _ov else " "
+                _p(f"  {mark} {i}. {m}", ("gr" if m == _ov else "dim"))
+            return
+        if arg not in ms:
+            _p(f"Không thấy model '{arg}'. Dùng /model để xem có sẵn.", "ye")
+            return
+        os.environ["REM_MODEL"] = arg
+        try:
+            with open(os.path.join(config.DIR, "rem_model"), "w", encoding="utf-8") as _f:
+                _f.write(arg)
+        except Exception:
+            pass
+        _p(f"Đã chọn model: {arg} (áp dụng từ câu hỏi kế tiếp).", "gr")
+
+    # ── toast: thông báo nổi góc phải kiểu opencode (ANSI, mờ) ──
+    def _toast(self, msg, kind="info"):
+        txt = _strip_ansi(str(msg))[:90]
+        col = {"ok": "gr", "err": "rd", "warn": "ye"}.get(kind, "dim")
+        _p(f"   {C[col]}▍{C['reset']} {_strip_ansi(txt)}", "dim")
 
     def _clear(self):
         self._clear_spin_line()
@@ -1611,6 +1925,34 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             _p(f"⏳ Câu hỏi đã xếp hàng (#{self._pending}).", "ye")
         self.q.put(("task", text))
 
+    # ── @file mention: đính kèm file vào lệnh kiểu opencode attachment ──
+    def _expand_mentions(self, text):
+        """Thay @đường/dẫn/file bằng nội dung file (opencode attachment).
+        - file: nhúng nội dung (tối đa 6000 ký tự)
+        - thư mục: liệt kê 15 mục đầu
+        Không khớp (email/nonexistent) → giữ nguyên dòng gõ."""
+        def _rep(m):
+            p = os.path.expanduser(m.group(1))
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8", errors="replace") as f:
+                        c = f.read(6000)
+                    _p(f"  ⤷ đã đính kèm file {p} ({len(c)} ký tự)", "dim")
+                    return f"\n[FILE:{p}]\n{c}\n[/FILE]"
+                except Exception:
+                    _p(f"  ⚠ không đọc được {p}", "ye")
+                    return ""
+            if os.path.isdir(p):
+                try:
+                    items = sorted(os.listdir(p))[:15]
+                except Exception:
+                    items = []
+                _p(f"  ⤷ đã đính kèm danh sách thư mục {p} ({len(items)} mục)", "dim")
+                return f"\n[DIR:{p}]\n" + "\n".join(items) + "\n[/DIR]"
+            return m.group(0)
+        # @ ở đầu token (không phải giữa email) — thay khi đúng đường dẫn thật
+        return re.sub(r"(?<!\S)@(\S+)", _rep, text)
+
     # ── /list: liệt kê macro/skill/chat cũ để chọn số mở ra ─────────────
     def _stats(self):
         """Thống kê dùng của session hiện tại (kiểu opencode stats)."""
@@ -1634,6 +1976,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             nkeys = 0
         _p(f"Session {self.sid} — user:{nu} assistant:{na} tool:{len(tools)} "
            f"~{chars // 4} tokens (~{chars} ký tự) — Groq keys:{nkeys}", "gr")
+        try:
+            _rt = groq.session_usage()
+            _p(f"Token thật từ API (phiên này): ↑{_rt.get('prompt', 0)} "
+               f"↓{_rt.get('completion', 0)} · {_rt.get('calls', 0)} calls", "cy")
+        except Exception:
+            pass
         for n, c in top:
             _p(f"  {n:20} {c}", "dim")
         if not msgs:
@@ -1908,66 +2256,38 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             except Exception:
                 pass
         if cmd == "/help":
-            _lines = [
-                    "/help    trợ giúp",
-                    "/list    liệt kê macro/skill/chat cũ (gõ số để mở)",
-                    "/rec     ghi thao tác desktop thành macro",
-                    "/play <số>  phát lại macro trong /list",
-                    "/resume <số>  mở lại đoạn chat cũ trong /list",
-                    "/done    dừng ghi macro & lưu (khi đang ⏺ ghi)",
-                    "/status  xem extension + tool + session",
-                    "/stats   thống kê dùng: tin nhắn, tool calls, ký tự (kiểu opencode stats)",
-                    "/sessions [/continue]  liệt kê/chuyển session cũ",
-                    "/new     tạo session mới",
-                    "/rename <tên>  đặt tên session hiện tại",
-                    "/fork    nhân bản session hiện tại thành session mới",
-                    "/del <id>  xoá 1 session cũ",
-                    "/models [số]  xem/chọn model chat (ghim yêu thích)",
-                    "/connect thêm provider/key (chọn Groq, dán key)",
-                    "/plan    chuyển preset PLAN (chỉ đọc)",
-                    "/build   quay lại preset BUILD",
-                    "/auto    tự động — không hỏi (mặc định)",
-                    "/safe    hỏi xác nhận trước tool ghi/bash/fetch",
-                    "/stop    dừng agent đang xử lý (giữ session) — hoặc ESC 1 lần (mềm), ESC 2 lần (cứng)",
-                    "/rest N  hẹn máy TỰ NGỦ sau N phút (mặc định 60) — rem-rest",
-                    "/debug   bật/tắt chế độ gỡ lỗi",
-                    "/think   xem đầy đủ suy luận của lần trả lời cuối",
-                    "/thinking [on|off]  hiện/ẩn khối suy luận (kiểu opencode)",
-                    "/clear   xoá màn hình (hiện logo REM)",
-                    "/overlay on|off|status  cửa sổ nổi hiện việc đang làm",
-                    "/checkupdate  kiểm tra bản mới trên GitHub",
-                    "/update  tự cập nhật bản mới nhất (git/tarball)",
-                    "/lsp <file>  kiểm tra lỗi file nguồn (clangd/pylsp)",
-                    "/mcp     xem / nạp lại MCP server ngoài (~/.rem_ai/mcp.json)",
-                    "/export  xuất chat ra markdown + mở $EDITOR",
-                    "/keybinds  bảng phím tắt (tương đương opencode)",
-                    "/undo    lùi 1 turn (kèm hoàn tác file đã đổi, cần git)",
-                    "/redo    làm lại turn vừa undo (kèm file)",
-                    "/compact|/summarize  ép tóm tắt context ngay",
-                    "/details [on|off]  bật/tắt chi tiết tool (3 dòng đầu result)",
-                    "/editor  mở $EDITOR soạn tin rồi gửi",
-                    "/themes|/theme [tên]  liệt kê / chuyển theme",
-                    "/share   export markdown local (~/.rem_ai/exports/)",
-                    "/unshare gỡ share local (stub)",
-                    "/import <file>  nhập JSON opencode hoặc JSONL Rem",
-                    "/voice [status|nghe [giây]|nói <text>|<lệnh thoại>]  mic/STT/TTS tiếng Việt",
-                    "/init    tạo AGENTS.md cho thư mục đang làm việc",
-                    "/keys    xem số Groq keys",
-                    "/key gsk_...  thêm Groq key",
-                    "/<tên-file> custom command (*.md: ~/.rem_ai/commands/, .opencode/commands/, ~/.config/opencode/commands/)",
-                    "@file   chèn nội dung file vào prompt · @explore/@general gọi agent con",
-                    "!cmd    chạy bash trực tiếp",
-                    "/exit|/quit|/q  thoát",
-            ]
+            # Help nhóm theo mục từ _SLASH_CAT (kiểu command list opencode)
+            _p("Rem Agent — danh sách lệnh (gõ /palette để tìm nhanh)", "bold")
+            by_cat = {}
+            for c, (cat, desc, args, _a) in _SLASH_CAT.items():
+                by_cat.setdefault(cat, []).append((c, desc, args))
+            for cat in ["Cơ bản", "Điều khiển", "Hiển thị", "Lịch sử", "Quyền hạn", "Cấu hình", "Phát triển", "Hệ thống"]:
+                items = by_cat.pop(cat, [])
+                if not items:
+                    continue
+                _p(f"— {cat.upper()} —", "bold")
+                for c, desc, args in items:
+                    hint = f" {args}" if args else ""
+                    pad = max(1, 12 - len(c) - len(hint))
+                    _p(f"  {C['cy']}{c}{hint}{C['reset']}{' ' * pad}{desc}", "dim")
+            for cat, items in by_cat.items():
+                if not items:
+                    continue
+                _p(f"— {cat.upper()} —", "bold")
+                for c, desc, args in items:
+                    hint = f" {args}" if args else ""
+                    pad = max(1, 12 - len(c) - len(hint))
+                    _p(f"  {C['cy']}{c}{hint}{C['reset']}{' ' * pad}{desc}", "dim")
+            _p("TAB: tự hoàn thành lệnh · /palette: bảng lệnh tìm nhanh · /theme: đổi màu", "dim")
             try:
                 _cc = _load_custom_commands()
                 _builtins = {s.lstrip("/") for s in _SLASH}
                 _extras = sorted(n for n in _cc if n not in _builtins)
                 if _extras:
-                    _lines.append("— lệnh riêng của bạn: " + " · ".join("/" + n for n in _extras[:20]))
+                    _p("— lệnh riêng của bạn: " + " · ".join("/" + n for n in _extras[:20]), "dim")
             except Exception:
                 pass
-            _p("\n".join(_lines), "dim")
+            _p("@file chèn nội dung file vào prompt · @explore/@general gọi agent con · !cmd chạy bash trực tiếp", "dim")
         elif cmd == "/list" or cmd.startswith("/list "):
             if len(parts) > 1:
                 if not self._list_items:
@@ -2029,6 +2349,10 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 _p("Đã tắt cửa sổ nổi.", "gr")
             else:
                 _p(f"Cửa sổ nổi: {'ĐANG CHẠY' if _overlay_running() else 'đang tắt'} (gõ /overlay on|off)", "dim")
+        elif cmd == "/palette":
+            self._palette()
+        elif cmd == "/theme" or cmd.startswith("/theme "):
+            self._theme(parts[1] if len(parts) > 1 else "")
         elif cmd == "/clear":
             self._clear()
         elif cmd == "/stop":
@@ -2100,6 +2424,15 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             else:
                 self.show_thinking = not self.show_thinking
             _p(f"Hiện khối suy luận: {'BẬT' if self.show_thinking else 'TẮT'}", "gr")
+        elif cmd == "/effort":
+            # Đổi mức suy luận reasoning_effort theo docs Groq (low/medium/high),
+            # áp dụng cho gpt-oss và qwen3.8 từ câu hỏi kế tiếp, không tốn gì thêm.
+            lv = (parts[1].strip().lower() if len(parts) > 1 else "")
+            if lv in ("low", "medium", "high"):
+                os.environ["REM_REASONING"] = lv
+                _p(f"Mức suy luận: {lv} (gpt-oss, qwen3.8).", "gr")
+            else:
+                _p(f"Mức hiện tại: {os.environ.get('REM_REASONING', 'low')} — dùng: /effort low|medium|high", "dim")
         elif cmd == "/del":
             if len(parts) < 2:
                 _p("Cú pháp: /del <session-id>  (xem /sessions)", "dim")
@@ -2111,6 +2444,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             on = cmd == "/auto"
             self._agent.perm.set_auto(on)
             _p("Chế độ TỰ ĐỘNG: không hỏi xác nhận." if on else "Chế độ AN TOÀN: hỏi xác nhận trước tool ghi/bash/fetch.", "gr")
+        elif cmd == "/todos":
+            self._todos()
+        elif cmd == "/compact":
+            self._compact()
+        elif cmd == "/model" or cmd.startswith("/model "):
+            self._model_pick(parts[1] if len(parts) > 1 else "")
         elif cmd == "/status":
             self._status()
         elif cmd == "/stats":
@@ -2548,6 +2887,9 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         try:
             ms = groq.chat_models()
             mshort = (ms[0].split("/")[-1] if ms else "?")[:18]
+            _lu = getattr(self, "_last_turn_use", {}) or {}
+            if _lu.get("prompt") or _lu.get("completion"):
+                mshort += f" ↑{_lu.get('prompt', 0)} ↓{_lu.get('completion', 0)}"
         except Exception:
             mshort = "?"
         try:
@@ -2593,6 +2935,15 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         self._clear()
         if not groq.keys():
             _p("⚠  CHƯA CÓ GROQ KEY — gõ: /key gsk_...  để thêm", "rd")
+        # model đã chọn bằng /model giữa các phiên → nạp lại từ file rem_model
+        try:
+            if not os.environ.get("REM_MODEL", "").strip():
+                with open(os.path.join(config.DIR, "rem_model"), encoding="utf-8") as _f:
+                    _saved_model = _f.read().strip()
+                if _saved_model:
+                    os.environ["REM_MODEL"] = _saved_model
+        except Exception:
+            pass
         if self.headless is None:
             try:
                 print(_logo_banner())
@@ -2730,4 +3081,4 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     sys.stdout.flush()
             except Exception:
                 _p("User> " + line, "lm")
-            self.q.put(("task", line))
+            self.q.put(("task", self._expand_mentions(line)))

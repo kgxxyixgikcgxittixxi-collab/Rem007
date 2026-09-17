@@ -143,6 +143,48 @@ def _dec(t):
     return None
 
 
+# ── Token usage accounting (kiểu opencode: footer ↑in ↓out mỗi lượt) ──
+# Groq (chuẩn OpenAI) trả "usage" trong response JSON và chunk cuối của stream
+# (khi có stream_options.include_usage). Trước đây agent vứt hết → không có
+# số liệu token thật. _note_usage() gom vào _UTURN (reset mỗi lượt) + _UTOT.
+_UTURN = {"prompt": 0, "completion": 0, "calls": 0}
+_UTOT = {"prompt": 0, "completion": 0, "calls": 0}
+_ULOCK = threading.Lock()
+
+
+def _note_usage(u):
+    try:
+        if not isinstance(u, dict):
+            return
+        p = int(u.get("prompt_tokens") or 0)
+        c = int(u.get("completion_tokens") or 0)
+        if p < 0 or c < 0:
+            return
+        if p == 0 and c == 0:
+            return  # báo usage rỗng (vd chunk giữa stream) → không tính 1 call ảo
+        with _ULOCK:
+            for d in (_UTURN, _UTOT):
+                d["prompt"] += p
+                d["completion"] += c
+                d["calls"] += 1
+    except Exception:
+        pass
+
+
+def take_usage():
+    """Lấy + reset số token của lượt vừa xong (TUI gọi sau mỗi task)."""
+    with _ULOCK:
+        d = dict(_UTURN)
+        _UTURN.update(prompt=0, completion=0, calls=0)
+    return d
+
+
+def session_usage():
+    """Tổng token thật từ đầu phiên (cho /stats + status bar)."""
+    with _ULOCK:
+        return dict(_UTOT)
+
+
 _KCACHE = {"t": 0.0, "v": []}
 
 
@@ -196,13 +238,24 @@ def scan(t):
 
 
 def seed_defaults():
-    """Nạp key mặc định từ biến môi trường REM_GQ_SEED (phân cách xuống dòng/phẩy/dấu cách)
-    chỉ khi DB chưa có key nào. Key được mã hoá trước khi lưu, không nằm trong repo."""
+    """Nạp key mặc định khi DB chưa có key nào, từ (1) file ~/.rem_ai/seed_keys.txt
+    (mỗi key một dòng, hoặc cách nhau bởi khoảng trắng/phẩy/xuống dòng) và
+    (2) biến môi trường REM_GQ_SEED. Key được mã hoá trước khi lưu vào rem.db
+    và KHÔNG BAO GIỜ nằm trong repo git (file seed nằm ngoài repo)."""
     if keys():
         return 0
     txt = os.environ.get("REM_GQ_SEED", "") or ""
-    found = re.findall(r"gsk_[A-Za-z0-9]{40,}", txt)
-    return sum(1 for k in found if add_key(k))
+    try:
+        with open(os.path.join(DIR, "seed_keys.txt"), "r", encoding="utf-8") as f:
+            txt += "\n" + f.read()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    found = re.findall(r"gsk_[A-Za-z0-9]{20,}", txt)
+    seen = set()
+    uniq = [k for k in found if not (k in seen or seen.add(k))]
+    return sum(1 for k in uniq if add_key(k))
 
 
 _MODELS = {"items": None, "at": 0.0}
@@ -833,6 +886,33 @@ def _note_fast(model):
         pass
 
 
+# ── Tham số theo tài liệu Groq cho reasoning models ──────────────────────
+# https://console.groq.com/docs/reasoning : temperature 0.5-0.7 + top_p 0.95
+# để reasoning ổn định (mặc định dễ lặp/vỡ); reasoning_effort low/medium/high
+# cho gpt-oss và qwen3.8 (qwen3.6 chỉ none/default nên không gắn effort).
+_REASON_TEMP = 0.6
+_REASON_TOP_P = 0.95
+
+
+def _is_reason_model(model):
+    m = model or ""
+    return m.startswith("openai/gpt-oss") or m.startswith("qwen/qwen3")
+
+
+def _apply_reason_params(model, body):
+    """Gắn tham số docs Groq cho reasoning models. Chỉ gắn khi body chưa tự set."""
+    body = dict(body)
+    if not _is_reason_model(model):
+        return body
+    body.setdefault("temperature", _REASON_TEMP)
+    body.setdefault("top_p", _REASON_TOP_P)
+    effort = os.environ.get("REM_REASONING", "low").strip().lower()
+    if effort in ("low", "medium", "high") and (
+            model.startswith("openai/gpt-oss") or model.startswith("qwen/qwen3.8")):
+        body["reasoning_effort"] = effort
+    return body
+
+
 def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
     """Gọi Groq với KeyManager: weighted key selection, circuit breaker, smart retry.
     cancel: threading.Event của ESC//stop → hủy trong ≤0.5s (không treo hết timeout).
@@ -842,11 +922,7 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
         return None
     if _slow_cooldown(model):
         return None
-    _set_det(False, "")
-    body = dict(body)
-    effort = os.environ.get("REM_REASONING", "low").strip().lower()
-    if model.startswith("openai/gpt-oss") and effort in ("low", "medium", "high"):
-        body["reasoning_effort"] = effort
+    body = _apply_reason_params(model, body)
     ks = keys()
     if not ks:
         return None
@@ -1026,7 +1102,14 @@ def chat(msgs, tools=None, budget=None, cancel=None):
                 return ({"role": "assistant", "content": f"[LOI {_det_msg()}]\n{_warn}"}
                         if _det_msg() else None)
             if r is not None:
-                return r.json()["choices"][0]["message"]
+                _data = r.json()
+                _note_usage(_data.get("usage"))
+                _msg = _data["choices"][0]["message"]
+                # gpt-oss trả thêm trường "reasoning" nhưng agent chỉ dùng
+                # content/tool_calls (/think đọc từ stream) → bỏ để gọn context
+                if isinstance(_msg, dict):
+                    _msg.pop("reasoning", None)
+                return _msg
             all_rate = False
         if all_rate:
             wait = min(1 + attempt, 4)
@@ -1094,6 +1177,8 @@ def _iter_stream(r, on_delta, cancel=None):
                 d = json.loads(data)
             except Exception:
                 continue
+            if d.get("usage"):
+                _note_usage(d["usage"])
             ch = (d.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
             # Groq gpt-oss trả reasoning ở `delta.reasoning` (field chính thức);
@@ -1157,16 +1242,8 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
     Có thể ép model qua env REM_MODEL=openai/gpt-oss-20b.
     cancel: ESC//stop hủy trong ≤0.5s. Model chậm (timeout 2 lần) bị bỏ qua 5 phút,
     xoay sang model nhanh ngay thay vì treo 70s×5 như bản cũ."""
-    body = {"messages": _strip_reasoning(msgs), "max_tokens": 8192, "stream": True}
-    _warn = _ctx_guard(body["messages"])
-    if _warn:
-        # Context quá dài → không gửi (tiết kiệm budget + 23 key), báo rõ để agent compact
-        if on_delta:
-            try:
-                on_delta({"type": "content", "text": _warn})
-            except Exception:
-                pass
-        return {"role": "assistant", "content": _warn}
+    body = {"messages": msgs, "max_tokens": 8192, "stream": True,
+            "stream_options": {"include_usage": True}}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -1266,7 +1343,9 @@ def text(p, max_tokens=700, temp=0.2, budget=None, cancel=None):
         if _is_cancelled(cancel):
             return ""
         if r is not None and r != "RATE" and r.status_code == 200:
-            content = r.json()["choices"][0]["message"].get("content")
+            _data = r.json()
+            _note_usage(_data.get("usage"))
+            content = _data["choices"][0]["message"].get("content")
             if content:
                 return content
             # content rỗng → thử model kế tiếp
@@ -1294,7 +1373,9 @@ def vision(q, img, budget=None, cancel=None):
         if r == "RATE":
             return None
         if r is not None and r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
+            _data = r.json()
+            _note_usage(_data.get("usage"))
+            return _data["choices"][0]["message"]["content"]
     return None
 
 

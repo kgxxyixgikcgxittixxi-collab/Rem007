@@ -33,7 +33,8 @@ def _external_specs():
             data = json.load(f) or {}
     except FileNotFoundError:
         return []
-    except Exception:
+    except Exception as e:
+        print(f"[cảnh báo] {MCP_FILE} lỗi, bỏ qua MCP ngoài: {e}", file=sys.stderr)
         return []
     mcp = data.get("mcp") if isinstance(data, dict) else None
     if not isinstance(mcp, dict):
