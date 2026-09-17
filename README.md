@@ -2,7 +2,7 @@
 
 Agent cá nhân MCP-native chạy 100% trên Groq, kiến trúc theo goose/opencode — mọi thao tác qua công cụ MCP (mỗi công cụ chạy tiến trình riêng).
 
-## Tính năng (v3.85)
+## Tính năng (v3.87)
 
 - **60+ tool / 8 MCP server**: file+shell, web, memory graph, LSP, desktop Linux, **trình duyệt Playwright**, **làm video**
 - **Xoay key Groq thông minh** với 13+ key (mỗi key 1 tài khoản độc lập):

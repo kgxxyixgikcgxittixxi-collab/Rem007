@@ -81,6 +81,48 @@ TASK_DEF = {
 }
 
 
+# Tool hỏi user giữa task kiểu Claude AskUserQuestion / opencode question:
+# agent đưa câu hỏi + options, user chọn số. Thực thi bởi Repl (worker thread
+# hỏi trực tiếp qua input, như _ask quyền). Headless → tự chọn option đầu.
+ASK_USER_DEF = {
+    "name": "ask_user",
+    "description": ("HỎI USER: khi có nhiều hướng làm và cần user quyết (kế hoạch, "
+                    "thư viện, phạm vi...), gọi tool này thay vì đoán mò. "
+                    "questions: tối đa 4 câu, mỗi câu 2-4 options {label, description}. "
+                    "User trả lời → tiếp tục đúng hướng đã chọn. Dùng khi THẬT cần, "
+                    "không lạm dụng hỏi vặt."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "description": "danh sách câu hỏi (tối đa 4)",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "câu hỏi ngắn gọn"},
+                        "options": {
+                            "type": "array",
+                            "description": "2-4 lựa chọn",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string", "description": "nhãn ngắn (3-6 từ)"},
+                                    "description": {"type": "string", "description": "giải thích 1 dòng"},
+                                },
+                                "required": ["label"],
+                            },
+                        },
+                    },
+                    "required": ["question", "options"],
+                },
+            },
+        },
+        "required": ["questions"],
+    },
+}
+
+
 class Extension:
     def __init__(self, name, module, desc, command=None, env=None):
         self.name = name
@@ -161,6 +203,7 @@ class Manager:
         self.extensions = [Extension(**s) for s in base]
         self._task_n = 0
         self._task_lock = _th.Lock()
+        self.ask_user_handler = None  # Repl gán: fn(args) -> str (hỏi user giữa task)
 
     def start_all(self):
         # Khởi động song song (trước đây nối tiếp ~6s). Mỗi extension chỉ chạm
@@ -223,6 +266,11 @@ class Manager:
                 )
         if self._task_depth() == 0:
             out.append({"type": "function", "function": dict(TASK_DEF)})
+            try:
+                if getattr(self, "ask_user_handler", None):
+                    out.append({"type": "function", "function": dict(ASK_USER_DEF)})
+            except Exception:
+                pass
         return out
 
     # ── task subagent (kiểu Claude Code Explore): agent con chạy việc tách biệt
@@ -273,7 +321,7 @@ class Manager:
                          "subagent khác, không đụng todo của phiên chính, không dùng mic/loa. ")
             else:
                 for t in ("write_file", "edit_file", "apply_patch", "bash", "bash_poll",
-                          "chdir", "pip_install", "ensure_tool", "task",
+                          "chdir", "pip_install", "ensure_tool", "task", "ask_user",
                           "dl_click", "dl_type", "dl_key", "dl_mouse", "dl_clipboard",
                           "dl_open", "dl_focus", "dl_wait", "dl_screenshot",
                           "rec_start", "rec_stop", "rec_play", "rec_delete",
@@ -338,6 +386,14 @@ class Manager:
     def call(self, name, args, timeout=120):
         if name == "task":
             return self._run_subagent(args, timeout)
+        if name == "ask_user":
+            try:
+                fn = getattr(self, "ask_user_handler", None)
+                if fn is None:
+                    return "[LOI] ask_user chưa được gắn (chạy ngoài REPL?) — tự quyết thay vì hỏi"
+                return fn(args or {})
+            except Exception as e:
+                return f"[LOI] ask_user: {type(e).__name__}: {e}"
         tm = self.tool_map()
         if name not in tm:
             return f"[LOI] tool '{name}' không tồn tại trong extension nào"

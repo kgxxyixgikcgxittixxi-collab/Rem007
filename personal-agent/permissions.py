@@ -21,6 +21,8 @@ ASK = {
     # web nặng: tải ảnh / tạo PDF (ghi file, tốn mạng)
     "web_images", "web_download_image", "web_download_images",
     "make_pdf",
+    # hỏi user giữa task (worker hỏi trực tiếp qua input)
+    "ask_user",
     # ghi nhớ / học (đổi trạng thái) → hỏi ở safe mode
     "skill_save", "exp_lesson_save", "exp_skill_save",
     # điều khiển desktop
@@ -64,6 +66,24 @@ def _save_rules(rules):
             json.dump(rules, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def add_persistent_rule(pattern, action="allow"):
+    """Học quyền lâu dài kiểu Continue 'don't ask again': ghi vào permissions.json.
+    Trả True nếu lưu được. Rule mới chèn ĐẦU để thắng rule cũ."""
+    try:
+        pattern = str(pattern or "").strip()
+        if not pattern or action not in ("allow", "ask", "deny"):
+            return False
+        rules = _load_rules()
+        if not isinstance(rules, list):
+            rules = []
+        rules = [r for r in rules if not (isinstance(r, dict) and r.get("pattern") == pattern)]
+        rules.insert(0, {"pattern": pattern, "action": action})
+        _save_rules(rules)
+        return True
+    except Exception:
+        return False
 
 
 def _match_pattern(pattern, tool_name, args):

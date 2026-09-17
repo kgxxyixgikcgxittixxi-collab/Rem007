@@ -257,6 +257,9 @@ def _sys(manager, sid, cwd, user_text=""):
             "chỉ trả tóm tắt về. type='explore' (mặc định, CHỈ ĐỌC) cho tìm hiểu; type='general' "
             "(full tool) cho việc nhiều bước cần sửa file/chạy lệnh. "
             "Mô tả rõ việc + format kết quả cần trả về. Không dùng task cho việc nhỏ gọi trực tiếp được.\n"
+            "HỎI USER KHI PHÂN VÂN: đứng trước ngã rẽ quan trọng (chọn hướng/kế hoạch/phạm vi) "
+            "→ gọi ask_user(questions=[{question, options:[{label, description}]}]) để user chọn, "
+            "rồi làm tiếp đúng hướng đã chọn. Dùng khi THẬT cần, không hỏi vặt.\n"
             "HƯỚNG DẪN DÙNG TOOL ĐẶC THÙ:\n"
             "- DESKTOP/CHUP MAN HINH/DIEU KHIEN UNG DUNG: dung dl_* tools. KHONG BAO GIO tu choi "
             "\"khong co tool chup man hinh\" — dl_tree THAY THE screenshot bang cach doc cay giao dien AT-SPI. "
@@ -498,11 +501,13 @@ class Agent:
         self._error_patterns.clear()
         self._tool_fingerprints.clear()
         self._last_steps = []
+        self._write_snap = False  # đã snapshot trước ghi file của turn hiện tại chưa
         self._task_hash = hashlib.md5(user_text.encode()).hexdigest()[:16]
         sessions.append(self.sid, {"role": "user", "content": user_text})
         deadline = time.time() + config.MAX_TASK_SECONDS
         last_tool_errors = []  # track recent tool errors for self-healing
         for turn in range(1, MAX_TURNS + 1):
+            self._write_snap = False  # mỗi turn được 1 snapshot trước lần ghi đầu
             stopped = self._check_stop(deadline)
             if stopped:
                 return self._finish(user_text, stopped)
@@ -631,9 +636,27 @@ class Agent:
                         continue
                     args_note = str(args)[:120]
                     self._emit({"type": "tool_start", "name": name, "args": args, "args_note": args_note})
-                    if not self.perm.decide(name, args, askfn=self.askfn):
+                    # Hook pre_tool kiểu Claude Code (chặn trước khi chạy)
+                    _hook_ok, _hook_note = True, ""
+                    try:
+                        import hooks as _hooks
+                        _hook_ok, _hook_note = _hooks.run_pre(name, args, self.sid)
+                    except Exception:
+                        pass
+                    if not _hook_ok:
+                        result = (f"[TU CHOI] Tool {name} bị hook chặn: {_hook_note or 'không rõ lý do'}. "
+                                  f"Hãy giải thích với người dùng.")
+                    elif not self.perm.decide(name, args, askfn=self.askfn):
                         result = f"[TU CHOI] Tool {name} bị chặn bởi permission. Hãy giải thích với người dùng."
                     else:
+                        # Checkpoint kiểu Cline/gemini: snapshot git TRƯỚC lần ghi file
+                        # đầu tiên của mỗi turn → /undo luôn hoàn tác được file.
+                        if name in ("write_file", "edit_file", "apply_patch") and not getattr(self, "_write_snap", False):
+                            try:
+                                sessions.work_snapshot(self.sid)
+                            except Exception:
+                                pass
+                            self._write_snap = True
                         try:
                             budget = max(1, int(deadline - time.time()))
                             if budget <= 0:
@@ -670,6 +693,14 @@ class Agent:
                     # Diff cũ/mới kiểu opencode: gửi kèm kết quả đầy đủ của tool sửa file
                     # để REPL vẽ diff inline (event result vẫn cắt gọn như cũ).
                     _full = result if name in ("edit_file", "write_file", "apply_patch") else ""
+                    _ok_now = not (result and (result.startswith("[LOI]") or result.startswith("[TOOL LOI]") or result.startswith("[TU CHOI]")))
+                    try:
+                        import hooks as _hooks2
+                        if _hook_note:
+                            result = (result or "") + f"\n[HOOK] {_hook_note}"
+                        _hooks2.run_post(name, args, _ok_now, self.sid)
+                    except Exception:
+                        pass
                     self._emit({"type": "tool_done", "name": name, "result": str(result)[:200], "full": _full})
                     sessions.append(
                         self.sid,

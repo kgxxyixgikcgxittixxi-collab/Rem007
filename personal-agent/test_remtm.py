@@ -349,6 +349,55 @@ def test_no_real_keys_in_repo():
     check("repo sạch key thật", not bad, str(bad[:3]))
 
 
+def test_day_features():
+    print("[11] tính năng ngày: hooks/ask_user/học quyền/review/sanitize")
+    import repl
+    import hooks
+    ok, note = hooks.run_pre("bash", {"command": "ls"}, "t")
+    check("hooks vắng mặt cho qua", ok is True and note == "")
+    import json
+    fp = os.path.join(os.path.expanduser("~"), ".rem_ai", "hooks.json")
+    bak = None
+    try:
+        if os.path.isfile(fp):
+            bak = fp + ".bak-trem"
+            os.replace(fp, bak)
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump({"pre_tool": ["python3 -c \"print('DENY: test')\""]}, f)
+        ok2, note2 = hooks.run_pre("bash", {"command": "x"}, "t")
+        check("hooks DENY chặn", ok2 is False and "test" in note2, str(note2)[:60])
+    finally:
+        try:
+            os.remove(fp)
+        except Exception:
+            pass
+        if bak:
+            try:
+                os.replace(bak, fp)
+            except Exception:
+                pass
+    from extensions import Manager, ASK_USER_DEF
+    m = Manager(specs=[])
+    check("ask_user ẩn khi chưa gắn", "ask_user" not in [t["function"]["name"] for t in m.schemas()])
+    m.ask_user_handler = lambda a: "chọn 1"
+    check("ask_user hiện khi đã gắn", "ask_user" in [t["function"]["name"] for t in m.schemas()])
+    import types as _types
+    _fake = _types.SimpleNamespace(_clear_spin_line=lambda: None)
+    _r = repl.Repl._ask_user(_fake, {"questions": []})
+    check("ask_user thiếu questions báo lỗi", "questions" in _r, _r[:60])
+    import permissions as _pm
+    check("học quyền roundtrip", _pm.add_persistent_rule("_trem_xyz", "allow") and
+          any(r.get("pattern") == "_trem_xyz" for r in _pm._load_rules()))
+    _pm._save_rules([r for r in _pm._load_rules() if r.get("pattern") != "_trem_xyz"])
+    import repl
+    check("slash /review", "/review" in repl._SLASH)
+    check("label Hỏi", repl._TOOL_LABEL.get("ask_user") == "Hỏi")
+    check("perm ask_user", _pm.PermPolicy().policy("ask_user") in ("ask", "allow"))
+    src = open("repl.py", encoding="utf-8").read()
+    check("export sanitize key", "ĐÃ-ẨN" in src)
+    check("snapshot trước ghi", "_write_snap" in open("agentloop.py", encoding="utf-8").read())
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -370,6 +419,7 @@ def main():
         test_opencode_parity()
         test_context_hardening()
         test_no_real_keys_in_repo()
+        test_day_features()
         print(f"--> lượt {rnd}: {PASS} pass, {FAIL} fail")
         total_fail += FAIL
     print(f"TỔNG: {total_fail} fail sau {args.loop} lượt")

@@ -253,6 +253,7 @@ _TOOL_LABEL = {
     "web_download_images": "DlImgs", "remember": "Remember", "recall": "Recall",
     "ensure_tool": "Setup", "pip_install": "PyPI", "make_pdf": "PDF", "github_api": "GitHub",
     "todo_list": "Todo", "todo_write": "Todo", "task": "Task",
+    "ask_user": "Hỏi",
     "log": "Log", "kill": "Kill",
     "browser_open": "Browser", "browser_navigate": "Browser", "browser_click": "Click",
     "browser_click_text": "ClickText", "browser_type": "Type", "browser_press": "Key",
@@ -624,6 +625,7 @@ _SLASH_CAT = {
     "/plan":         ("Quyền hạn", "Chuyển preset PLAN (chỉ đọc)", "", ()),
     "/build":        ("Quyền hạn", "Quay lại preset BUILD", "", ("/agent",)),
     "/lsp":          ("Phát triển", "Kiểm tra lỗi file nguồn (clangd/pylsp)", "<file>", ()) ,
+    "/review":       ("Phát triển", "Review diff git + lỗi LSP bằng agent con", "", ()),
     "/mcp":          ("Hệ thống", "Xem / nạp lại MCP server ngoài", "reload", ()),
     "/init":         ("Cơ bản", "Tạo AGENTS.md cho thư mục đang làm việc", "", ()),
     "/keys":         ("Cấu hình", "Xem số Groq keys", "", ()),
@@ -887,6 +889,64 @@ class Repl:
         self._agent = Agent(self.manager, Presets.build(), sid=sid or self.sid,
                             on_event=self._on_ev)
         self._agent.askfn = self._ask
+        try:
+            self.manager.ask_user_handler = self._ask_user
+        except Exception:
+            pass
+
+    def _ask_user(self, args):
+        """Thực thi tool ask_user kiểu Claude AskUserQuestion: agent hỏi, user chọn số.
+        Chạy trong worker thread (hỏi trực tiếp qua input như _ask quyền).
+        Headless (không tty) → tự chọn option đầu mỗi câu."""
+        try:
+            qs = (args or {}).get("questions") or []
+        except Exception:
+            qs = []
+        if not isinstance(qs, list) or not qs:
+            return "[LOI] ask_user cần 'questions' (tối đa 4 câu, mỗi câu 2-4 options)"
+        qs = qs[:4]
+        headless = not sys.stdin.isatty()
+        try:
+            self._clear_spin_line()
+        except Exception:
+            pass
+        out_lines = []
+        for qi, q in enumerate(qs, 1):
+            if not isinstance(q, dict):
+                continue
+            text = str(q.get("question") or "").strip()[:300] or f"Câu {qi}"
+            opts = q.get("options") or []
+            if not isinstance(opts, list):
+                opts = []
+            opts = [o for o in opts if isinstance(o, dict) and str(o.get("label") or "").strip()][:4]
+            if len(opts) < 2:
+                out_lines.append(f"Câu {qi}: {text} → (thiếu options, tự quyết)")
+                continue
+            _p(f"❓ {text}", "ye")
+            for i, o in enumerate(opts, 1):
+                desc = str(o.get("description") or "").strip()[:120]
+                _p(f"   {i}. {o.get('label')}{(' — ' + desc) if desc else ''}", "cy")
+            if headless:
+                pick = [0]
+                _p(f"   → (headless: tự chọn 1. {opts[0].get('label')})", "dim")
+            else:
+                try:
+                    raw = input(f"   Chọn [1-{len(opts)}] (Enter=1): ").strip()
+                except Exception:
+                    raw = ""
+                if not raw:
+                    pick = [0]
+                else:
+                    pick = []
+                    for part in raw.replace(",", " ").split():
+                        if part.isdigit() and 1 <= int(part) <= len(opts):
+                            if int(part) - 1 not in pick:
+                                pick.append(int(part) - 1)
+                    if not pick:
+                        pick = [0]
+            chosen = [str(opts[i].get("label") or "").strip() for i in pick]
+            out_lines.append(f"Câu {qi}: {text} → user chọn: {'; '.join(chosen)}")
+        return "\n".join(out_lines) or "(user không chọn gì — tự quyết)"
 
     # ── dừng opencode-style: ESC đơn = mềm (wrap-up), ESC đúp = cứng (bỏ hết) ──
     def _request_stop(self, hard=False):
@@ -1590,13 +1650,24 @@ class Repl:
             mini = str(args)[:120]
             _p(f"  {mini}", "dim")
         try:
-            a = input("  Cho phép? [y/N/a=luôn auto] ").strip().lower()
+            a = input("  Cho phép? [y/N/l=luôn cho phép tool này/a=luôn auto] ").strip().lower()
         except Exception:
             return False
         if a in ("a", "all", "luon", "auto"):
             self._agent.perm.set_auto(True)
             self.presets = "build"
             _p("  Đã chuyển chế độ TỰ ĐỘNG — không hỏi nữa (xoá bằng /safe).", "gr")
+            return True
+        if a in ("l", "always", "luon-cho-phep"):
+            # Học quyền lâu dài kiểu Continue 'don't ask again' → permissions.json
+            try:
+                import permissions as _pm
+                ok = _pm.add_persistent_rule(name, "allow")
+                if ok:
+                    self._agent.perm.rules = _pm._load_rules()
+            except Exception:
+                ok = False
+            _p(f"  Đã nhớ: luôn cho phép '{name}'" if ok else "  [LOI] không lưu được quyền.", "gr" if ok else "rd")
             return True
         return a in ("y", "yes", "ok", "cho", "phep", "1", "c")
 
@@ -2021,10 +2092,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
         if not msgs:
             _p("(đoạn chat trống, không có gì để xuất)", "dim")
             return ""
+        import re as _re2
+        _keypat = _re2.compile(r"gsk_[A-Za-z0-9]{20,}")
         lines = [f"# Chat {self.sid}", ""]
         for m in msgs:
             role = m.get("role", "?")
-            body = (m.get("content") or "").strip()
+            body = _keypat.sub("gsk_***ĐÃ-ẨN***", (m.get("content") or "").strip())
             if role == "user":
                 lines += ["## 🙋 Bạn", "", body, ""]
             elif role == "assistant":
@@ -2258,6 +2331,61 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                     except Exception:
                         pass
         return True
+
+    def _review(self):
+        """Review code kiểu Kilo/Cursor: gom git diff + lỗi LSP rồi nhờ agent con
+        explore chấm (bug/bảo mật/phong cách), context chính không bị ngập diff."""
+        if self._busy:
+            _p("Agent đang bận — đợi hết lượt rồi gõ /review.", "ye")
+            return
+        import subprocess as _sp
+        try:
+            _r = _sp.run(["git", "rev-parse", "--git-dir"], capture_output=True,
+                         text=True, timeout=10)
+            if _r.returncode != 0:
+                _p("Không phải git repo — /review cần git diff.", "ye")
+                return
+            _d = _sp.run(["git", "diff", "HEAD", "--stat", "--", "."],
+                         capture_output=True, text=True, timeout=15)
+            _n = _sp.run(["git", "diff", "HEAD", "--name-only", "--", "."],
+                         capture_output=True, text=True, timeout=15)
+            _full = _sp.run(["git", "diff", "HEAD", "--", "."],
+                            capture_output=True, text=True, timeout=15)
+        except Exception as e:
+            _p(f"[LOI] git: {e}", "rd")
+            return
+        files = [f.strip() for f in (_n.stdout or "").splitlines() if f.strip()][:8]
+        if not files:
+            _p("Không có thay đổi nào so với HEAD — không có gì để review.", "dim")
+            return
+        _p(f"Review {len(files)} file đổi: {', '.join(files[:5])}"
+           f"{'…' if len(files) > 5 else ''}", "cy")
+        diags = []
+        try:
+            from mcp_servers.lsp_server import lsp_diagnostics
+            for f in files[:5]:
+                if os.path.isfile(f) and f.endswith((".py", ".c", ".h", ".cpp", ".hpp", ".js", ".ts")):
+                    try:
+                        diags.append(f"--- LSP {f} ---\n{lsp_diagnostics(f)[:1500]}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        diff_txt = (_full.stdout or "")[:12000]
+        prompt = ("Bạn là agent REVIEW code (chỉ đọc, không sửa). Chấm thay đổi dưới đây:\n"
+                  "1) Bug logic có thể có (chỉ rõ file/dòng). 2) Vấn đề bảo mật. "
+                  "3) Phong cách/quy ước repo. 4) Gợi ý sửa cụ thể, ngắn.\n"
+                  "Trả tiếng Việt, gọn, theo mục. Không có vấn đề thì nói rõ 'ổn'.\n\n"
+                  f"--- GIT DIFF STAT ---\n{(_d.stdout or '')[:2000]}\n\n"
+                  f"--- DIFF ---\n{diff_txt}\n\n"
+                  + ("\n".join(diags)[:6000] if diags else "(không có kết quả LSP)"))
+        try:
+            out = self.manager._run_subagent(
+                {"description": "review code", "prompt": prompt, "type": "explore"},
+                timeout=240)
+        except Exception as e:
+            out = f"[LOI] review: {type(e).__name__}: {e}"
+        _p(out or "(rỗng)", "gr")
 
     def slash(self, line):
         cmd = line.strip()
@@ -2535,6 +2663,8 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
             except Exception as e:
                 out = f"[LOI] {type(e).__name__}: {e}"
             _p(out, "gr" if "(không có lỗi)" in out else "ye")
+        elif cmd == "/review":
+            self._review()
         elif cmd == "/mcp" or cmd.startswith("/mcp "):
             exts = self.manager.external_list()
             if not exts:
