@@ -1409,6 +1409,19 @@ class Repl:
                 # Không animate frame — CHỈ in lại khi trạng thái THAY ĐỔI.
                 # Tránh "treo" hiện ra hàng trăm dòng lặp lại trong log/pipe.
                 cur = re.sub(r"\x1b\[[0-9;]*m", "", msg).strip()
+                # Cắt gọn theo rộng terminal (lệnh dài trong status làm tràn
+                # nhiều dòng — user phàn nàn "đang suy luận in dài ra").
+                try:
+                    _tw = render.term_width() or 90
+                except Exception:
+                    _tw = 90
+                if render.disp_len(cur) > _tw - 12:
+                    _s = ""
+                    for _ch in cur:
+                        if render.disp_len(_s + _ch) > _tw - 13:
+                            break
+                        _s += _ch
+                    cur = _s + "…"
                 if cur and cur != last_msg:
                     w = int(time.time() - self._status_since)
                     tag = f"  [{w}s]{'  ⏳ lâu quá — /stop nếu kẹt' if w >= config.TOOL_SLOW_WARN else ''}"
@@ -1431,9 +1444,22 @@ class Repl:
                 col = "\033[91m"
             else:
                 col = "\033[36m"
-            # kiểu opencode: frame spinner màu + nội dung mờ — chậm hơn để bớt "nháy"
+            # kiểu opencode: frame spinner màu + nội dung mờ — chậm hơn để bớt "nháy".
+            # Cắt đúng 1 dòng terminal (bản cũ [:150] vẫn tràn 2 dòng ở màn hình hẹp).
+            try:
+                _tw2 = render.term_width() or 90
+            except Exception:
+                _tw2 = 90
+            _vis = re.sub(r"\x1b\[[0-9;]*m", "", base)
+            if render.disp_len(_vis) > _tw2 - 4:
+                _s2 = ""
+                for _ch in base:
+                    if render.disp_len(re.sub(r"\x1b\[[0-9;]*m", "", _s2 + _ch)) > _tw2 - 5:
+                        break
+                    _s2 += _ch
+                base = _s2 + "…"
             with _OUT_LOCK:
-                sys.stdout.write("\r" + col + f + C["dim"] + base[:150] + C["reset"] + "\033[K")
+                sys.stdout.write("\r" + col + f + C["dim"] + base + C["reset"] + "\033[K")
                 sys.stdout.flush()
             time.sleep(0.4)
             i += 1

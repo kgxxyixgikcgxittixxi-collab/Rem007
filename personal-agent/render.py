@@ -454,9 +454,9 @@ def thinking_to_ansi(text, tw=None, full=False):
         return ""
     plain = re.sub(r"\s+", " ", _strip_inline(text)).strip() or "bài toán phức tạp"
     lines = [ln for ln in (l.strip() for l in text.split("\n")) if ln]
-    if len(plain) <= 72 and len(lines) <= 2:
+    if len(plain) <= 60 and len(lines) <= 2:
         full = True  # quá ngắn thì hiện luôn
-    head = DIM + "─ " + YE + "Đã suy luận" + (f" · {plain[:72]}{'…' if len(plain) > 72 else ''}" if not full else "") + RESET
+    head = DIM + "─ " + YE + "Đã suy luận" + (f" · {plain[:60]}{'…' if len(plain) > 60 else ''}" if not full else "") + RESET
     out = [head]
     if full:
         for ln in lines:
