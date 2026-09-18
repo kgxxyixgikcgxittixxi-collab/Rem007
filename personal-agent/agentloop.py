@@ -536,6 +536,8 @@ class Agent:
         last_tool_errors = []  # track recent tool errors for self-healing
         for turn in range(1, MAX_TURNS + 1):
             self._write_snap = False  # mỗi turn được 1 snapshot trước lần ghi đầu
+            turn_t0 = time.time()
+            turn_ok0 = sum(1 for s in self._last_steps if (s or {}).get("result_ok"))
             stopped = self._check_stop(deadline)
             if stopped:
                 return self._finish(user_text, stopped)
@@ -557,6 +559,14 @@ class Agent:
                 stopped = self._check_stop(deadline)
                 if stopped:
                     return self._finish(user_text, stopped)
+                # Pool quota cạn (xoay key mãi không xong tool nào): cắt sớm thay vì
+                # nghiền 5 phút trong im lặng — báo rõ để user 'tiếp tục' sau 1-2 phút.
+                if time.time() - turn_t0 > 150:
+                    _ok_now = sum(1 for s in self._last_steps if (s or {}).get("result_ok"))
+                    if _ok_now <= turn_ok0:
+                        return self._finish(user_text,
+                            "[TẠM DỪNG] Quota Groq cả pool đang cạn (xoay key nhiều vòng không xong tool nào). "
+                            "Nghỉ 1-2 phút rồi gõ 'tiếp tục' để chạy tiếp — không mất tiến độ.")
                 # CHỈ ĐẠO LIVE: lệnh gõ giữa chừng → chèn ngay vào lượt đang chạy,
                 # agent điều chỉnh việc đang làm, không làm lại từ đầu.
                 for _note in self._drain_notes():

@@ -855,6 +855,24 @@ def _post_cancelable(url, headers, payload, timeout, cancel=None, stream=False, 
 # xoay sang model nhanh hơn ngay — hết treo 70s×5 lần như log lỗi).
 _SLOW = {}
 _SLOW_LOCK = threading.Lock()
+_NOTOOLS = {}  # model báo 400 tool-unsupported → cấm gọi kèm tools trong 1h
+_NOTOOLS_TTL = 3600
+
+
+def _notools_active(model):
+    try:
+        with _SLOW_LOCK:
+            return _NOTOOLS.get(model, 0) > time.time()
+    except Exception:
+        return False
+
+
+def _note_notools(model):
+    try:
+        with _SLOW_LOCK:
+            _NOTOOLS[model] = time.time() + _NOTOOLS_TTL
+    except Exception:
+        pass
 
 
 def _slow_cooldown(model):
@@ -922,6 +940,8 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
         return None
     if _slow_cooldown(model):
         return None
+    if _notools_active(model) and isinstance(body, dict) and body.get("tools"):
+        return "NOTOOLS"  # model này đã báo không hỗ trợ tools — khỏi đốt request
     body = _apply_reason_params(model, body)
     ks = keys()
     if not ks:
@@ -1012,6 +1032,14 @@ def _post(body, model, timeout=30, budget=None, cancel=None, stream=False):
                 except Exception:
                     _err_msg = ""
                 _ldet = f"HTTP {r.status_code}: {_err_msg[:300]}" if _err_msg else f"HTTP {r.status_code}"
+                _elow = (_err_msg or "").lower()
+                if r.status_code == 400 and "tool" in _elow and "support" in _elow:
+                    # Model này KHÔNG hỗ trợ tool calling — KHÔNG phải lỗi request
+                    # cố định: cấm model này (kèm tools) 1h, báo caller xoay model khác
+                    # ngay thay vì bỏ cuộc với [LOI HTTP 400...].
+                    _note_notools(model)
+                    _km.report_failure(choice)
+                    return "NOTOOLS"
                 if r.status_code == 400 and _err_msg and ("context" in _err_msg.lower()
                                                           or "token" in _err_msg.lower()
                                                           or "tool" in _err_msg.lower()):
@@ -1097,6 +1125,8 @@ def chat(msgs, tools=None, budget=None, cancel=None):
                 return None
             if r == "RATE":
                 continue
+            if r == "NOTOOLS":
+                continue  # model không hỗ trợ tools → model kế tiếp
             if _det_flag():
                 # Lỗi request cố định (context tràn...) — agent cần SỬA request, không thử tiếp
                 return ({"role": "assistant", "content": f"[LOI {_det_msg()}]\n{_warn}"}
@@ -1264,7 +1294,7 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
         for m in chain[:5]:
             if time.time() >= end or _is_cancelled(cancel):
                 break
-            if _slow_cooldown(m):
+            if _slow_cooldown(m) or (_notools_active(m) and tools):
                 skipped_slow += 1
                 continue
             r = _post(body, m, budget=max(1, end - time.time()), timeout=(10, 30),
@@ -1284,6 +1314,10 @@ def chat_stream(msgs, tools=None, budget=None, on_delta=None, cancel=None):
             if r == "RATE":
                 # Key độc lập → 429 1 key chỉ cần xoay: thử model kế tiếp ngay
                 # (mỗi model lại xoay qua 23 key ở _post). KHÔNG ngủ chờ org.
+                continue
+            if r == "NOTOOLS":
+                # Model không hỗ trợ tool calling → model kế tiếp ngay, không báo lỗi
+                all_rate = False
                 continue
             if r is None:
                 all_rate = False

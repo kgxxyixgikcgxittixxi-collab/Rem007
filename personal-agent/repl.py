@@ -44,12 +44,17 @@ def _prompt_rows(prompt_plain, buf_text, tw):
 
 
 def _erase_input_locked(r):
-    """Xóa sạch dòng input đang gõ (đúng số hàng wrap) — gọi khi đã giữ _OUT_LOCK."""
+    """Xóa sạch dòng input đang gõ (đúng số hàng wrap) — gọi khi đã giữ _OUT_LOCK.
+    Dùng prompt ĐÃ VẼ (_drawn_prompt) thay vì prompt hiện tại: trạng thái bận/rảnh
+    đổi top-line prompt giữa chừng (pending/live count) làm lệch số hàng → sót
+    mảnh '╭─...'/'╰─❯' trên màn hình. Buffer đọc live (user vẫn đang gõ)."""
     try:
         tw = render.term_width() or 90
-        pp = re.sub(r"\x1b\[[0-9;]*m", "", str(getattr(r, "_input_prompt", "") or ""))
+        drawn = getattr(r, "_drawn_prompt", None)
+        if drawn is None:
+            drawn = re.sub(r"\x1b\[[0-9;]*m", "", str(getattr(r, "_input_prompt", "") or ""))
         bb = "".join(getattr(r, "_input_buf", []) or [])
-        rows = _prompt_rows(pp, bb, tw)
+        rows = _prompt_rows(drawn, bb, tw)
         sys.stdout.write("\r\033[2K")
         for _ in range(rows - 1):
             sys.stdout.write("\033[1A\033[2K")
@@ -62,8 +67,9 @@ def _erase_input_locked(r):
 def _redraw_input_locked(r):
     """Vẽ lại prompt + ký tự đã gõ sau khi in output chen ngang — gọi khi giữ _OUT_LOCK."""
     try:
-        sys.stdout.write(str(getattr(r, "_input_prompt", "") or "")
-                         + "".join(getattr(r, "_input_buf", []) or []))
+        _pr = str(getattr(r, "_input_prompt", "") or "")
+        sys.stdout.write(_pr + "".join(getattr(r, "_input_buf", []) or []))
+        r._drawn_prompt = re.sub(r"\x1b\[[0-9;]*m", "", _pr)
         sys.stdout.flush()
     except Exception:
         pass
@@ -1018,6 +1024,10 @@ class Repl:
         self._input_buf = buf
         self._input_prompt = prompt
         try:
+            self._drawn_prompt = re.sub(r"\x1b\[[0-9;]*m", "", prompt or "")
+        except Exception:
+            self._drawn_prompt = None
+        try:
             fd = sys.stdin.fileno()
             old = _tm.tcgetattr(fd)
         except Exception:
@@ -1403,6 +1413,13 @@ class Repl:
         last_beat = 0.0  # nhịp tim: nhắc tiến độ khi 1 trạng thái kéo dài
         while self._spin_on:
             msg = self._status_msg or ""
+            # Hết quota Groq → nói rõ đang chờ bao lâu thay vì "đang suy luận" mù mờ
+            try:
+                _rw = groq.rate_wait_remaining()
+            except Exception:
+                _rw = 0
+            if _rw > 0.5:
+                msg = f"Groq hết quota lượt — chờ {int(_rw)}s rồi tự chạy tiếp"
             # Khi user đang gõ inject (main thread ở input()) → KHÔNG animate \r
             # đè lên dòng đang gõ (gây loạn chữ + mất chữ + paste lặp 40 lần).
             # Chỉ in khi trạng thái đổi, mỗi trạng thái 1 dòng mới.
