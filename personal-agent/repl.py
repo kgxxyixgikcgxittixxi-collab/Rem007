@@ -1400,6 +1400,7 @@ class Repl:
             self._status_since = time.time()
         is_tty = sys.stdout.isatty() and not config.DEBUG
         last_msg = None
+        last_beat = 0.0  # nhịp tim: nhắc tiến độ khi 1 trạng thái kéo dài
         while self._spin_on:
             msg = self._status_msg or ""
             # Khi user đang gõ inject (main thread ở input()) → KHÔNG animate \r
@@ -1427,6 +1428,14 @@ class Repl:
                     tag = f"  [{w}s]{'  ⏳ lâu quá — /stop nếu kẹt' if w >= config.TOOL_SLOW_WARN else ''}"
                     _p(f"  {cur}" + (tag if w >= 3 else ""), "dim")
                     last_msg = cur
+                    last_beat = time.time()
+                elif cur and cur == last_msg:
+                    # Nhịp tim: cùng 1 trạng thái quá 8s → nhắc 1 dòng ngắn
+                    # có số giây (im lặng lâu user tưởng treo).
+                    w = int(time.time() - self._status_since)
+                    if w >= 3 and time.time() - last_beat >= 8:
+                        _p(f"  {cur}  …[{w}s]", "dim")
+                        last_beat = time.time()
                 time.sleep(0.5)
                 continue
             f = SPIN[i % len(SPIN)]
