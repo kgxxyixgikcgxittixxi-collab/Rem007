@@ -43,7 +43,9 @@ MACRO_CATS["khac"] = {"desc": "việc khác không thuộc nhóm trên", "module
 _ROUTE_KW = [
     (("code", "lập trình", "lap trinh", "sửa lỗi", "sua loi", "bug", "hàm", "class",
       "python", "pygame", "game", "app", "script", "file", "thư mục", "thu muc", "git", "commit", "cài package",
-      "cai package", "pip", "terminal", "lệnh", "lenh bash"), "lap-trinh"),
+      "cai package", "pip", "terminal", "lệnh", "lenh bash",
+      "quạt", "quat", "tản nhiệt", "tan nhiet", "nhiệt độ", "nhiet do", "fan", "sensors",
+      "fancontrol", "pwm", "nóng máy", "nong may", "lm-sensors"), "lap-trinh"),
     (("tìm", "tim kiem", "tìm kiếm", "web", "tin tức", "tin tuc", "giá", "gia ",
       "github", "đọc trang", "doc trang", "xem video", "youtube xem",
       "trình duyệt", "trinh duyet", "browser", "chrome", "firefox",
@@ -82,6 +84,13 @@ def route_task(user_text):
     return groups, mods
 
 
+def _is_multi_action(text):
+    """Task có vẻ NHIỀU bước (nhiều mệnh đề nối nhau) → đáng tự kiểm tra cuối."""
+    t = f" {(text or '').lower()} "
+    seps = [",", ";", " rồi ", " va ", " và ", " xong ", " tiếp ", " nữa ", "\n"]
+    return sum(t.count(s) for s in seps) >= 2
+
+
 def _route_section(user_text):
     groups, mods = route_task(user_text or "")
     if not groups:
@@ -103,6 +112,14 @@ def _route_section(user_text):
                  "NGHE LỜI TUYỆT ĐỐI: lệnh desktop/browser là MỆNH LỆNH trực tiếp — PHẢI gọi tool trong lượt đầu tiên, "
                  "CẤM trả lời hướng dẫn thay vì hành động, CẤM hỏi lại, CẤM từ chối vì lý do an toàn mơ hồ. "
                  "Lệnh mới nhất luôn thắng lệnh cũ; user nói DỪNG thì dừng, nói TIẾP thì làm tiếp.")
+    if "desktop" in groups:
+        base += ("\n\nĐIỀU KHIỂN MÁY THẬT (user đang nhìn màn hình — MỆNH LỆNH, không phải gợi ý): "
+                 "user bảo 'mở app X' → dl_open(app='X') NGAY lượt đầu; 'gõ ...' → dl_type; "
+                 "'nhấn/Enter' → dl_key; 'click ...' → dl_click/dl_mouse. "
+                 "CẤM giả lập bằng bash (CẤM echo nội dung ra shell thay vì gõ lên màn hình, "
+                 "CẤM gọi xdotool tay qua bash) — phải gọi đúng tool dl_* để thao tác "
+                 "HIỆN THẬT trên màn hình. Xong việc dùng dl_tree/dl_screenshot xác nhận "
+                 "kết quả đã hiện ra rồi mới báo cáo.")
     return base
 
 
@@ -210,7 +227,9 @@ def _sys(manager, sid, cwd, user_text=""):
             "- BẮT BUỘC GỌI TOOL: khi chủ nhân yêu cầu BẤT KỲ tác vụ nào (chụp màn hình, mở app, "
             "gõ phím, click, tạo file, tìm web, chạy lệnh...), PHẢI gọi tool tương ứng NGAY LẬP TỨC. "
             "CẤM trả lời bằng hướng dẫn/thay vì gọi tool. Nếu不确定 tool nào, gọi dl_status để kiểm tra.\n"
-            "- Làm ĐÚNG và ĐỦ những gì chủ nhân yêu cầu, KHÔNG bỏ sót phần nào, làm tới khi HOÀN THÀNH.\n"
+             "- Làm ĐÚNG và ĐỦ những gì chủ nhân yêu cầu, KHÔNG bỏ sót phần nào, làm tới khi HOÀN THÀNH.\n"
+             "- Báo cáo TRUNG THỰC theo kết quả tool: chỉ báo bước nào đã có tool trả OK. "
+             "CẤM báo khống bước chưa gọi tool (vd chưa dl_key mà dám nói 'đã nhấn Enter').\n"
             "- TỰ GIẢI QUYẾT vấn đề: gặp lỗi thì chủ động chẩn đoán và thử nhiều cách khác nhau\n"
             "  (tối thiểu 2-3 lần thử, đổi hướng nếu cần). Cấm hỏi 'bạn muốn tôi làm gì tiếp'.\n"
             "  Chỉ dừng khi đã cạn kiệt phương án khả thi — khi đó báo rõ lỗi cuối cùng + đề xuất bước kế.\n"
@@ -337,6 +356,9 @@ class Agent:
         self.cancel = threading.Event()
         self.hard_abort = threading.Event()  # ESC đúp → dừng cứng, bỏ auto-resume
         self._error_patterns = {}  # pattern -> count (self-healing: track recurring errors)
+        self._empty_replies = 0  # số lần model trả rỗng liên tiếp (quá 2 → dừng báo rõ)
+        self._verified_done = False  # đã tự kiểm tra đủ bước cuối task chưa (tối đa 1 lần/task)
+        self.last_reasoning = ""  # suy luận model lượt này (hiện UI kiểu opencode; KHÔNG lưu session/context)
         self._tool_fingerprints = set()  # track which tools have been called with what args
         self._task_hash = ""  # fingerprint of current task for resume
         self._last_steps = []  # (tool, args) đã dùng cho task hiện tại (để auto-save skill)
@@ -502,6 +524,9 @@ class Agent:
         except Exception:
             pass
         self._error_patterns.clear()
+        self._empty_replies = 0
+        self._verified_done = False
+        self.last_reasoning = ""
         self._tool_fingerprints.clear()
         self._last_steps = []
         self._write_snap = False  # đã snapshot trước ghi file của turn hiện tại chưa
@@ -594,11 +619,55 @@ class Agent:
                         return self._finish(user_text, "[ĐÃ DỪNG] theo yêu cầu của người dùng.")
                     continue
                 tool_calls = reply.get("tool_calls") or []
+                # Gom reasoning kiểu opencode để hiện UI (không lưu session/context — giữ context-fix).
+                try:
+                    _rc = reply.get("reasoning_content") or reply.get("reasoning") or ""
+                    if _rc:
+                        self.last_reasoning = (self.last_reasoning + "\n" + str(_rc)).strip()[-6000:]
+                except Exception:
+                    pass
                 if not tool_calls:
-                    if turn > 1:
-                        content = reply.get("content") or ""
+                    content = (reply.get("content") or "").strip()
+                    if not content and not any((s or {}).get("result_ok") for s in self._last_steps):
+                        # Model trả RỖNG mà chưa có tool nào THÀNH CÔNG — CẤM bỏ cuộc kiểu "(rỗng)".
+                        # Nhắc gọi tool ngay (tối đa 2 lần), còn nước còn tát.
+                        # (Đã có tool OK rồi mà model im → giữ hành vi cũ: kết thúc êm.)
+                        self._empty_replies += 1
+                        if self._empty_replies <= 2 and time.time() < deadline - 10:
+                            nudge = {"role": "user", "content": (
+                                "[NHẮC LẦN %d: bạn vừa trả lời RỖNG, chưa gọi tool nào. "
+                                "Đây là MỆNH LỆNH hành động thật trên máy: gọi tool phù hợp "
+                                "NGAY trong lượt này (vd dl_status/dl_open/browser_open/bash...). "
+                                "CẤM trả lời rỗng, CẤM chỉ nói mà không làm.]" % self._empty_replies)}
+                            sessions.append(self.sid, nudge)
+                            msgs.append(dict(nudge))
+                            continue
+                        content = ("[LOI] model trả rỗng %d lần liên tiếp — gõ 'tiếp tục' "
+                                   "để thử lại." % self._empty_replies)
                     else:
-                        content = reply.get("content") or "(rỗng)"
+                        self._empty_replies = 0
+                    if (content and self._last_steps and not self._verified_done
+                            and _is_multi_action(user_text)
+                            and time.time() < deadline - 15):
+                        # Task NHIỀU bước mà model đòi kết thúc — bắt tự đối chiếu 1 lần:
+                        # thiếu bước thì làm nốt, đủ rồi thì thôi (chống báo khống kiểu
+                        # "đã nhấn Enter" trong khi chưa gọi dl_key).
+                        self._verified_done = True
+                        done_list = ", ".join(str((s or {}).get("tool", "?"))
+                                             for s in self._last_steps[-8:])
+                        chk = {"role": "user", "content": (
+                            "[TỰ KIỂM TRA LẦN CUỐI — không làm lại từ đầu: task gốc có NHIỀU bước. "
+                            f"Tool đã gọi xong: {done_list}. "
+                            "Đối chiếu từng bước trong task gốc: bước nào CHƯA có tool tương ứng "
+                            "thì gọi tool làm nốt NGAY; CẤM báo cáo bước chưa làm. "
+                            "Nếu mọi bước đã có tool OK thì chỉ trả lời kết quả gọn, không gọi thêm.]")}
+                        sessions.append(self.sid, chk)
+                        msgs.append(dict(chk))
+                        continue
+                    if not content:
+                        # Không bao giờ kết thúc im lặng: báo rõ để user gõ 'tiếp tục'.
+                        content = ("[LOI] task dở dang (model im lặng sau khi tool lỗi) — "
+                                   "gõ 'tiếp tục' để chạy tiếp.")
                     sessions.append(self.sid, {"role": "assistant", "content": content})
                     return self._finish(user_text, content)
                 sessions.append(

@@ -3,6 +3,10 @@ import json, os, random, threading, time
 from config import DIR, CTX_TOTAL, CTX_CAP, SUM_AT, SUM_BUDGET
 
 _APPEND_LOCK = threading.Lock()
+_LAST_FSYNC = 0.0       # fsync tiết kiệm: tối đa 1 lần/5s (đủ chống mất dữ liệu khi crash,
+                        # không fsync từng dòng — trên HDD mỗi fsync ~180ms, 1000 dòng thành 3 phút)
+_FSYNC_EVERY = 5.0
+_TITLED = set()         # sid đã có title trong phiên này → khỏi đọc file mỗi lần append
 from providers import groq
 
 SDIR = os.path.join(DIR, "sessions")
@@ -25,26 +29,33 @@ def new():
 
 
 def append(sid, msg):
-    # Ghi nối tiếp thread-safe + fsync: worker/compact/auto-resume ghi xen kẽ
-    # không rách JSONL, crash giữa chừng không mất dòng đã ghi.
+    # Ghi nối tiếp thread-safe: worker/compact/auto-resume ghi xen kẽ
+    # không rách JSONL (dòng nhỏ = 1 write syscall = nguyên tử dưới lock).
+    # fsync tiết kiệm 5s/lần thay vì từng dòng.
+    global _LAST_FSYNC
     line = json.dumps(msg, ensure_ascii=False) + "\n"
     with _APPEND_LOCK:
         with open(_f(sid), "a", encoding="utf-8") as f:
             f.write(line)
             try:
                 f.flush()
-                os.fsync(f.fileno())
+                now = time.time()
+                if now - _LAST_FSYNC >= _FSYNC_EVERY:
+                    os.fsync(f.fileno())
+                    _LAST_FSYNC = now
             except Exception:
                 pass
     # Auto-title kiểu opencode (title agent thu gọn): tin user đầu tiên đặt tên
-    # session nếu user chưa /rename. Không tốn LLM.
+    # session nếu user chưa /rename. Không tốn LLM. Bỏ qua nếu sid đã có title
+    # (tránh đọc file mỗi lần append — test 20 luồng x 50 tin từng treo ở đây).
     try:
-        if isinstance(msg, dict) and msg.get("role") == "user":
+        if isinstance(msg, dict) and msg.get("role") == "user" and sid not in _TITLED:
             ts = _load_titles()
             if sid not in ts:
                 t = " ".join(str(msg.get("content") or "").split())[:48] or sid
                 ts[sid] = t
                 _save_titles(ts)
+            _TITLED.add(sid)
     except Exception:
         pass
 
@@ -95,6 +106,7 @@ def set_title(sid, title):
         ts = _load_titles()
         ts[sid] = title
         _save_titles(ts)
+        _TITLED.add(sid)
         return True
     except Exception:
         return False

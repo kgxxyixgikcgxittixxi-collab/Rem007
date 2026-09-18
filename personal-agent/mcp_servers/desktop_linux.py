@@ -20,6 +20,25 @@ from config import DIR
 
 _lock = threading.Lock()
 
+# ID cửa sổ focus gần nhất (hex kiểu wmctrl, vd 0x026000c1) — dl_type/dl_key
+# focus lại đúng cửa sổ này trước khi gõ (xdotool type/key --window bị GTK
+# bỏ qua khi cửa sổ chưa focus — đã kiểm chứng bằng screenshot).
+_LAST_WID = ""
+
+
+def _ensure_wid():
+    """Focus lại cửa sổ _LAST_WID + kiểm tra active thật. Trả True nếu OK."""
+    if not _LAST_WID:
+        return True
+    try:
+        subprocess.run(["wmctrl", "-i", "-a", _LAST_WID], timeout=10)
+        time.sleep(0.3)
+        ar = subprocess.run(["xdotool", "getactivewindow"], capture_output=True,
+                            text=True, timeout=10)
+        return ar.returncode == 0 and int((ar.stdout or "0").strip()) == int(_LAST_WID, 16)
+    except Exception:
+        return False
+
 # roles được phép nhận ref để tương tác (giống tập role interactive của agent-desktop)
 _INTERACTIVE = {
     "button", "text", "textbox", "push button", "entry", "checkbox", "check box",
@@ -316,12 +335,14 @@ def _find_named(o, name, role, _depth=0):
 
 @_recorded("dl_type")
 def dl_type(text, clear=False, a=None):
-    """Gõ text vào phần tử đang focus (xdotool). clear=True thì xoá giá trị cũ trước."""
+    """Gõ text vào cửa sổ đã focus gần nhất (tự focus lại + kiểm tra trước khi gõ). clear=True thì xoá giá trị cũ trước."""
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
     text = str(text or "")
     if len(text) > 8000:
         return "[LOI] text quá dài (>8000 ký tự) — chia nhỏ ra"
+    if _LAST_WID and not _ensure_wid():
+        return f"[LOI] không focus được cửa sổ {_LAST_WID} — gọi dl_focus lại."
     if clear:
         _run(["key", "ctrl+a"])
     ok, msg = _run(["type", "--clearmodifiers", "--delay", "12", text])
@@ -332,6 +353,8 @@ def dl_type(text, clear=False, a=None):
 def dl_key(combo, a=None):
     if not _xd():
         return "[LOI] thiếu xdotool — cài: apt install xdotool"
+    if _LAST_WID and not _ensure_wid():
+        return f"[LOI] không focus được cửa sổ {_LAST_WID} — gọi dl_focus lại."
     ok, msg = _run(["key", str(combo)])
     return f"OK: đã nhấn {combo}." if ok else msg
 
@@ -382,7 +405,8 @@ def dl_clipboard(copy="", a=None):
 
 
 _APP_ALIASES = {
-    "terminal": ["gnome-terminal", "x-terminal-emulator", "xterm", "konsole"],
+    "terminal": ["xfce4-terminal", "gnome-terminal", "x-terminal-emulator", "xterm",
+                 "konsole", "lxterminal", "mate-terminal"],
     "files": ["nautilus", "nemo", "thunar", "dolphin"],
     "firefox": ["firefox"], "chrome": ["google-chrome", "chromium", "chromium-browser"],
     "browser": ["xdg-open"], "vscode": ["code", "codium"], "code": ["code", "codium"],
@@ -394,7 +418,8 @@ _APP_ALIASES = {
 @_recorded("dl_open")
 def dl_open(app="", url="", a=None):
     """MỞ APP hoặc URL: app='Terminal'/'Firefox'/'Files'/tên lệnh; url='https://...' mở bằng trình duyệt mặc định.
-    Nghe lời tuyệt đối — gọi 1 phát là mở, không cần dl_tree trước."""
+    Gọi 1 phát là mở, không cần dl_tree trước. Xác minh cửa sổ mới thật (wmctrl),
+    thử ứng viên kế tiếp nếu chưa hiện — không báo OK khống."""
     app = (app or "").strip()
     url = (url or "").strip()
     if url:
@@ -408,33 +433,56 @@ def dl_open(app="", url="", a=None):
         return "[LOI] cần app (vd Terminal/Firefox/Files) hoặc url"
     key = app.lower()
     cands = list(_APP_ALIASES.get(key, [])) + [app, app.lower(), app.lower().replace(" ", "-")]
-    # thử gtk-launch (tên .desktop) trước, rồi lệnh trực tiếp
+    tried = []
+
+    def _wins():
+        try:
+            rr = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, timeout=10)
+            return set(rr.stdout.splitlines()) if rr.returncode == 0 else set()
+        except Exception:
+            return set()
+
+    before = _wins()
     for c in cands:
+        if not c or c in tried:
+            continue
+        tried.append(c)
+        launched = False
+        # lệnh trực tiếp trước (chắc chắn) — gtk-launch Popen luôn "thành công"
+        # dù app không tồn tại nên chỉ là dự bị
         if shutil.which(c):
             try:
                 subprocess.Popen([c], stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, start_new_session=True)
-                return f"OK: đã mở {app} ({c})."
+                launched = True
             except Exception:
                 continue
-        try:
-            subprocess.Popen(["gtk-launch", c], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
-            return f"OK: đã mở {app} (gtk-launch {c})."
-        except Exception:
+        elif shutil.which("gtk-launch"):
+            try:
+                subprocess.Popen(["gtk-launch", c], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                launched = True
+            except Exception:
+                continue
+        else:
             continue
-    # fallback cuối: xdg-open với tên (một số DE tự phân giải)
-    try:
-        subprocess.Popen(["xdg-open", app], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-        return f"OK: đã thử mở {app} bằng xdg-open."
-    except Exception as e:
-        return f"[LOI] không tìm thấy app '{app}'. Thử dl_apps để xem app đang mở, hoặc cài app trước."
+        if not launched:
+            continue
+        time.sleep(1.2)
+        if _wins() - before:
+            return f"OK: đã mở {app} ({c})."
+        # chưa thấy cửa sổ mới → thử ứng viên kế tiếp, không báo OK khống
+    if not shutil.which("wmctrl"):
+        return f"OK: đã thử mở {app} ({', '.join(tried) or 'không có ứng viên'})."
+    return (f"[LOI] đã thử {', '.join(tried)} nhưng không thấy cửa sổ mới của '{app}'. "
+            f"App có thể chưa cài — thử dl_apps để xem app đang mở.")
 
 
 @_recorded("dl_focus")
 def dl_focus(title="", a=None):
-    """FOCUS 1 cửa sổ đang mở theo tên (vd 'Terminal', 'Firefox'). Dùng khi nhiều cửa sổ chồng nhau."""
+    """FOCUS 1 cửa sổ đang mở theo tên (vd 'Terminal', 'Firefox'). Dùng khi nhiều cửa sổ chồng nhau.
+    Ghi nhớ ID cửa sổ + kiểm tra active thật — dl_type/dl_key sau đó bám đúng cửa sổ này."""
+    global _LAST_WID
     title = (title or "").strip()
     if not title:
         return "[LOI] cần title (1 phần tên cửa sổ, vd Terminal)"
@@ -443,14 +491,31 @@ def dl_focus(title="", a=None):
         try:
             rr = subprocess.run([wm, "-l"], capture_output=True, text=True, timeout=10)
             wins = (rr.stdout or "").strip().splitlines()
-            hit = next((l for l in wins if title.lower() in l.lower()), "")
+            # khớp từng từ (vd 'Terminal personal-agent' khớp 'Terminal - ...: ~/Rem007/personal-agent'),
+            # rớt xuống khớp cụm nguyên văn nếu không có từ nào khớp hết
+            words = [w for w in title.lower().split() if w]
+            hit = next((l for l in wins if words and all(w in l.lower() for w in words)), "")
+            if not hit:
+                hit = next((l for l in wins if title.lower() in l.lower()), "")
             if not hit:
                 return f"[LOI] không thấy cửa sổ chứa '{title}'. Mở bằng dl_open trước. Đang có {len(wins)} cửa sổ."
             wid = hit.split()[0]
+            _LAST_WID = wid
             subprocess.run([wm, "-i", "-a", wid], timeout=10)
-            subprocess.run([wm, "-i", "-r", wid, "-b", "add,above"], timeout=10)
-            subprocess.run([wm, "-i", "-r", wid, "-b", "remove,above"], timeout=10)
-            return f"OK: đã focus cửa sổ '{hit.strip()[:100]}'."
+            # kiểm tra active thật (focus có thể bị giật) — thử lại 1 lần
+            for _ in range(2):
+                try:
+                    ar = subprocess.run(["xdotool", "getactivewindow"], capture_output=True,
+                                        text=True, timeout=10)
+                    if ar.returncode == 0 and int((ar.stdout or "0").strip()) == int(wid, 16):
+                        return f"OK: đã focus cửa sổ '{hit.strip()[:100]}' (id {wid}, đã kiểm tra active)."
+                except Exception:
+                    pass
+                subprocess.run([wm, "-i", "-a", wid], timeout=10)
+                time.sleep(0.4)
+            return f"OK: đã focus cửa sổ '{hit.strip()[:100]}' (id {wid}, chưa kiểm tra được active)."
+        except Exception as e:
+            return f"[LOI] {type(e).__name__}: {e}"
         except Exception as e:
             return f"[LOI] {type(e).__name__}: {e}"
     # fallback xdotool

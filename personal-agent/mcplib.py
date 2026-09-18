@@ -77,6 +77,12 @@ class Tool:
 
     def run(self, args):
         try:
+            if isinstance(args, dict):
+                # Model đôi khi gửi key rỗng/không phải chuỗi (vd {"": {}} cho tool
+                # không tham số) → TypeError lãng phí 1 lượt + 1 lần tự hồi phục.
+                # Lọc ở biên: chỉ giữ key chuỗi non-empty.
+                args = {k: v for k, v in args.items()
+                        if isinstance(k, str) and k.strip()}
             out = self.func(**args) if isinstance(args, dict) else self.func(args)
         except Exception as e:
             out = f"[LOI] {type(e).__name__}: {e} | {args}"

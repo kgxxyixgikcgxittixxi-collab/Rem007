@@ -255,7 +255,7 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TOOL_LABEL = {
     "read_file": "Read", "write_file": "Write", "edit_file": "Edit",
     "apply_patch": "Patch", "bash": "Bash", "bash_poll": "Job", "list_dir": "List",
-    "glob_files": "Glob", "grep": "Grep", "repo_map": "RepoMap", "web_search": "WebSearch",    "web_fetch": "WebFetch", "web_images": "WebImg", "web_download_image": "DlImg",
+    "glob_files": "Glob", "grep": "Grep", "repo_map": "RepoMap", "web_search": "WebSearch",    "sourcegraph_search": "SrcGraph", "web_fetch": "WebFetch", "web_images": "WebImg", "web_download_image": "DlImg",
     "web_download_images": "DlImgs", "remember": "Remember", "recall": "Recall",
     "ensure_tool": "Setup", "pip_install": "PyPI", "make_pdf": "PDF", "github_api": "GitHub",
     "todo_list": "Todo", "todo_write": "Todo", "task": "Task",
@@ -1134,6 +1134,18 @@ class Repl:
                             _erase_input_locked(self)
                             _redraw_input_locked(self)
                     continue
+                if ch in ("\x0f", "\x14", "\x0b", "\x06", "\x13"):  # Phím tắt kiểu opencode:
+                    # Ctrl+O model · Ctrl+T theme · Ctrl+K palette · Ctrl+F chèn @file · Ctrl+S sessions
+                    # (điền lệnh vào dòng nhập để chọn tiếp, không submit ngay)
+                    _fill = {"\x0f": "/model ", "\x14": "/theme ", "\x0b": "/palette ",
+                             "\x06": "@", "\x13": "/sessions "}.get(ch, "")
+                    with _OUT_LOCK:
+                        _erase_input_locked(self)
+                        del buf[:]
+                        buf.extend(list(_fill))
+                        self._hist_i = None
+                        _redraw_input_locked(self)
+                    continue
                 if ch == "\t":  # TAB — autocomplete lệnh / (kiểu opencode)
                     cur = "".join(buf).strip()
                     if cur.startswith("/"):
@@ -1609,6 +1621,14 @@ class Repl:
                         sys.stdout.flush()
                     try:
                         think, body = render.split_thinking(out)
+                        # Gộp reasoning kênh riêng của model (gpt-oss) kiểu opencode —
+                        # vẫn KHÔNG lưu session/context, chỉ hiện màn hình.
+                        try:
+                            _lr = (getattr(getattr(self, "_agent", None), "last_reasoning", "") or "").strip()
+                        except Exception:
+                            _lr = ""
+                        if _lr and _lr not in think:
+                            think = (_lr + ("\n" + think if think else "")).strip()[-6000:]
                         self._last_think = think
                         # Opencode-style thinking block (tắt bằng /thinking)
                         if think.strip() and self.show_thinking:
@@ -1616,20 +1636,23 @@ class Repl:
                         # Body — render markdown sạch (opencode-style)
                         if body.strip():
                             _type(render.md_to_ansi(body), None)
-                        # Footer usage kiểu opencode: token lượt này + tổng phiên.
+                        # Token lượt này: chỉ hiện khi /details (mặc định ẩn cho gọn —
+                        # dòng dim ◆↑↓∑ là "chữ trắng nhỏ" user phàn nàn; xem lại bằng /usage).
                         try:
-                            _u = self._last_turn_use or {}
-                            _t = groq.session_usage()
-                            if _u.get("prompt") or _u.get("completion"):
-                                _p(f"◆ ↑{_u.get('prompt', 0)} ↓{_u.get('completion', 0)} · "
-                                   f"{self._last_turn_secs:.0f}s · "
-                                   f"∑↑{_t.get('prompt', 0)} ↓{_t.get('completion', 0)}", "dim")
+                            if getattr(self, "_verbose", False):
+                                _u = self._last_turn_use or {}
+                                _t = groq.session_usage()
+                                if _u.get("prompt") or _u.get("completion"):
+                                    _p(f"◆ ↑{_u.get('prompt', 0)} ↓{_u.get('completion', 0)} · "
+                                       f"{self._last_turn_secs:.0f}s · "
+                                       f"∑↑{_t.get('prompt', 0)} ↓{_t.get('completion', 0)}", "dim")
                         except Exception:
                             pass
-                        # Đáp án xong → gợi ý phím tắt kiểu opencode.
+                        # KHÔNG in footer_hints sau đáp án: prompt dòng trên đã có
+                        # "type a message · / for commands · @ file · ! bash" — in thêm
+                        # dòng ↵send... full-width gây lặp + tràn màn hình hẹp.
                         # KHÔNG in "❯ " tay ở đây — vòng input() kế tiếp sẽ in prompt
                         # (in tay gây double prompt "❯ ❯" và dính chữ như log lỗi).
-                        self._footer_hints()
                     finally:
                         with _OUT_LOCK:
                             _HOLD_REDRAW = False
@@ -1916,7 +1939,8 @@ class Repl:
         self._clear_spin_line()
         print(CLEAR_SEQ)
 
-    # ── /init: tạo AGENTS.md cho thư mục/ repo hiện tại (kiểu opencode) ──
+    # ── /init: tạo AGENTS.md cho thư mục/ repo hiện tại (port từ opencode /init:
+    # phân tích codebase + gom rule Cursor/Copilot/Claude có sẵn, ~20 dòng trọng tâm) ──
     def _init_agents(self):
         import subprocess as _sp
         try:
@@ -1939,16 +1963,59 @@ class Repl:
             langs = sorted(set(langs)) or ["—"]
         except Exception:
             pass
+        # Gom rule có sẵn kiểu opencode (Cursor/Copilot/Claude) để agent mới kế thừa
+        rules = []
+        try:
+            cands = [".cursorrules", ".github/copilot-instructions.md", "CLAUDE.md",
+                     ".opencode/AGENTS.md", ".config/opencode/AGENTS.md"]
+            try:
+                cr = _sp.check_output(["bash", "-c", "ls -A .cursor/rules 2>/dev/null"], text=True, timeout=5).split()
+                cands += [f".cursor/rules/{f}" for f in cr if f.endswith((".md", ".mdc"))][:5]
+            except Exception:
+                pass
+            for rel in cands:
+                fp = os.path.join(cwd, rel)
+                if os.path.isfile(fp):
+                    try:
+                        with open(fp, encoding="utf-8", errors="replace") as _f:
+                            txt = _f.read(1500).strip()
+                        if txt:
+                            rules.append(f"[{rel}]\n{txt}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Đoán lệnh chạy/test/build từ file dự án
+        cmds = []
+        try:
+            has = set(os.listdir(cwd))
+            if "package.json" in has:
+                try:
+                    import json as _j
+                    scr = (_j.load(open(os.path.join(cwd, "package.json"), encoding="utf-8")) or {}).get("scripts", {})
+                    if isinstance(scr, dict):
+                        cmds += [f"npm run {k} — {v}" for k, v in list(scr.items())[:6]]
+                except Exception:
+                    pass
+            if "Makefile" in has or "makefile" in has:
+                cmds.append("make — xem target trong Makefile")
+            if "pytest.ini" in has or "tests" in has:
+                cmds.append("pytest — chạy test Python")
+            if "requirements.txt" in has:
+                cmds.append("pip install -r requirements.txt — cài phụ thuộc")
+            if "go.mod" in has:
+                cmds.append("go test ./... — chạy test Go")
+        except Exception:
+            pass
+        rules_sec = ("\n\n## Quy ước kế thừa (từ rule có sẵn)\n" + "\n\n".join(rules)) if rules else ""
+        cmds_sec = ("\n- " + "\n- ".join(cmds)) if cmds else "- Chạy ứng dụng / test / build:  (bổ sung)"
         tmpl = f"""# AGENTS.md — Hướng dẫn cho Rem Agent (và mọi AI agent)
 
 ## Dự án
 {name} — ở {cwd}
 Ngôn ngữ/tệp chính: {', '.join(langs)}
 
-## Lệnh hữu ích
-- Chạy ứng dụng:  (bổ sung, vd `python main.py`)
-- Chạy test:      (bổ sung, vd `pytest` / `bash test.sh`)
-- Build:          (bổ sung, vd `make` / `npm run build`)
+## Lệnh hữu ích{cmds_sec}
 
 ## Cấu trúc
 (Bổ sung sơ đồ thư mục chính ở đây — `ls -R` nếu cần quét.)
@@ -1957,12 +2024,12 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
 - Đọc trước khi sửa; dùng `edit_file`/`apply_patch` thay vì viết cả file trừ khi tạo mới.
 - Sau khi sửa code .c/.cpp/.py hãy chạy `lsp_diagnostics` để bắt lỗi tĩnh trước khi chạy/build.
 - Kiểm chứng mọi thay đổi bằng cách chạy lệnh test của dự án.
-- (Bổ sung quy ước riêng của nhóm ở đây.)
+- Chỉ trả lời đúng việc được giao; chưa đủ thông tin thì dùng tool kiểm tra, không suy đoán.{rules_sec}
 """
         try:
             with open(ag, "w", encoding="utf-8") as f:
                 f.write(tmpl)
-            _p(f"Đã tạo {ag}", "gr")
+            _p(f"Đã tạo {ag}" + (f" (kèm {len(rules)} rule kế thừa)" if rules else ""), "gr")
             _p("Sửa AGENTS.md theo dự án — Rem sẽ tự nạp file này khi làm việc trong thư mục.", "dim")
         except Exception as e:
             _p(f"[LOI] không ghi AGENTS.md: {e}", "rd")
@@ -3137,12 +3204,11 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                 print(_logo_banner())
             except Exception:
                 pass
-            _p("Gõ /help | /status | /stop | /clear | /exit", "dim")
+            _p("/help /status /stop /clear /exit · /list macro/skill · /rec ghi thao tác · Tab plan/build", "dim")
             try:
                 self._header_box()
             except Exception:
                 pass
-            _p("/list macro/skill/chat cũ · /rec ghi thao tác · Tab chuyển plan/build", "dim")
         else:
             try:
                 self._header_box()
@@ -3260,7 +3326,10 @@ Ngôn ngữ/tệp chính: {', '.join(langs)}
                         _last = _parts[-1] if _parts else ""
                         _rows += max(1, (render.disp_len(_last) + render.disp_len(line) + _tw - 1) // _tw)
                         sys.stdout.write("\r\033[2K")
-                        for _ in range(_rows - 1):
+                        # Xóa HẾT prompt (dòng gợi ý trên + dòng nhập): bản cũ range(_rows-1)
+                        # bỏ sót dòng gợi ý → sót "╭─..." trên mỗi User block, lâu ngày
+                        # dồn + kẹt "╰─❯User>" khi tính wrap lệch.
+                        for _ in range(_rows):
                             sys.stdout.write("\033[1A\033[2K")
                         sys.stdout.write("\r")
                     except Exception:

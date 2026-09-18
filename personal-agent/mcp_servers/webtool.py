@@ -289,9 +289,77 @@ def github_api(path, token=None):
     return clamp(body if isinstance(body, str) else __import__("json").dumps(body, ensure_ascii=False, indent=1), 20000)
 
 
+def sourcegraph_search(q, n=5):
+    """Tìm code public toàn cầu qua Sourcegraph (port từ tool sourcegraph của opencode).
+    q: cú pháp Sourcegraph (vd 'lang:python xdotool type', 'repo:^github.com/.*/vim.* mapleader')."""
+    import json as _json
+    q = (q or "").strip()
+    if not q:
+        return "[LOI] cần q (câu tìm code)"
+    n = max(1, min(_int(n, 5), 10))
+    url = "https://sourcegraph.com/.api/search/stream"
+    try:
+        r = requests.get(url, params={"q": q, "v": "V3", "display": min(n * 3, 30)},
+                         headers={**UA, "Accept": "text/event-stream"}, timeout=30, stream=True)
+        r.encoding = "utf-8"  # stream không báo charset → ép UTF-8 chống vỡ dấu
+    except Exception as e:
+        return f"[LOI] {type(e).__name__}: {e}"
+    if r.status_code != 200:
+        try:
+            r.close()
+        except Exception:
+            pass
+        return f"[LOI] HTTP {r.status_code}"
+    out = []
+    cur_event = ""
+    try:
+        for raw in r.iter_lines(decode_unicode=True):
+            if len(out) >= n:
+                break
+            if not raw:
+                continue
+            line = raw.strip()
+            if line.startswith("event:"):
+                cur_event = line[6:].strip()
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if cur_event != "matches" or not line.startswith("["):
+                continue
+            try:
+                items = _json.loads(line)
+            except Exception:
+                continue
+            for res in items if isinstance(items, list) else []:
+                if len(out) >= n or not isinstance(res, dict):
+                    continue
+                repo = res.get("repository") or ""
+                path = res.get("path") or ""
+                prevs = []
+                for lm in (res.get("lineMatches") or [])[:2]:
+                    pv = (lm.get("line") or "").strip()
+                    if pv:
+                        prevs.append(f"L{lm.get('lineNumber', '?')}: {pv[:160]}")
+                if path or repo:
+                    out.append(f"- {repo} {path}\n  " + ("\n  ".join(prevs) if prevs else "(khớp tên file)"))
+    except Exception as e:
+        if not out:
+            return f"[LOI] {type(e).__name__}: {e}"
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+    if not out:
+        return "(không có kết quả — thử từ khóa khác hoặc dùng web_search)"
+    return "\n".join(out[:n])
+
+
 TOOLS = [
     Tool("web_search", "Tìm kiếm trên web (DuckDuckGo). Kết quả: tiêu đề + link + mô tả.",
          schema({"q": {"type": "string"}, "n": {"type": "integer", "description": "số kết quả, mặc định 5"}}), web_search),
+    Tool("sourcegraph_search", "Tìm code public toàn cầu qua Sourcegraph (port từ opencode). Dùng khi cần ví dụ code thật ngoài web.",
+         schema({"q": {"type": "string", "description": "cú pháp Sourcegraph, vd 'lang:python xdotool type'"}, "n": {"type": "integer", "description": "số kết quả, mặc định 5"}}), sourcegraph_search),
     Tool("web_fetch", "Đọc nội dung 1 trang web thành văn bản.",
          schema({"url": {"type": "string"}, "max_chars": {"type": "integer", "description": "mặc định 40000"}}), web_fetch),
     Tool("github_api", "Gọi REST API của GitHub (vd: /user, /repos/Rem007/Rem).",
