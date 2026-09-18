@@ -21,6 +21,20 @@ def main():
         resume_sid = args[1]
     elif len(args) >= 2 and args[0] in ("h", "headless", "--task", "run"):
         headless = " ".join(args[1:]).strip()
+    if any(a == "--tui" for a in args):
+        # Fullscreen TUI kiểu opencode (Textual). REPL dòng lệnh cũ giữ nguyên khi không có cờ.
+        try:
+            import tui as _tui
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"[Remtm] Không mở được TUI: {e} (cài: pip install textual)")
+            sys.exit(2)
+        try:
+            _tui.run(manager)
+        finally:
+            manager.close_all()
+        return
     repl = Repl(manager, headless=headless, resume_sid=resume_sid)
     try:
         repl.run()

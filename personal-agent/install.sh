@@ -46,6 +46,7 @@ _pip() {
 }
 _pip "requests>=2.28"
 _pip "curl_cffi>=0.7" || echo "[!] curl_cffi chưa cài được — web_fetch vẫn chạy bằng requests."
+_pip "textual>=0.86" || echo "[!] textual chưa cài được — TUI fullscreen (--tui) không dùng được, REPL cũ vẫn chạy."
 _pip "reportlab>=4.0" || echo "[!] reportlab chưa cài được — xuất PDF sẽ không dùng được."
 
 # ── 2a. python-pptx (bài thuyết trình): lxml là gốc rễ trên ARM/Termux ────
