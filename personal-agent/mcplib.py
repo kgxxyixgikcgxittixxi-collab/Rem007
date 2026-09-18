@@ -1,6 +1,19 @@
 import json, threading, time
 
 PROTOCOL_VERSION = "2024-11-05"
+# Client hiện đại (vd opencode 1.x) gửi protocolVersion mới (2025-xx) và RỚT
+# handshake nếu server trả version cũ không hỗ trợ. Bộ tool của ta
+# (tools/list + tools/call) không đổi qua các version → echo lại version client
+# yêu cầu (đúng tinh thần spec: thương lượng version), fallback version cũ.
+KNOWN_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
+
+
+def negotiate_version(want):
+    want = (want or "").strip()
+    if want in KNOWN_VERSIONS:
+        return want
+    # version lạ tương lai: echo luôn (tool cơ bản tương thích), đừng gãy handshake
+    return want or PROTOCOL_VERSION
 
 
 def recv_msg(stream):
@@ -113,7 +126,7 @@ class Server:
             try:
                 if method == "initialize":
                     resp["result"] = {
-                        "protocolVersion": PROTOCOL_VERSION,
+                        "protocolVersion": negotiate_version((params or {}).get("protocolVersion")),
                         "capabilities": {"tools": {"listChanged": False}},
                         "serverInfo": {"name": self.name, "version": self.version},
                     }
@@ -127,8 +140,9 @@ class Server:
                 elif method == "tools/list":
                     resp["result"] = {
                         "tools": [t.definition() for t in self.tools.values()],
-                        "nextCursor": None,
                     }
+                    # KHÔNG gửi "nextCursor": null — opencode ≥1.18 validate strict,
+                    # null rớt handshake 'Failed to get tools' (đã bisect 2026-09).
                 elif method == "tools/call":
                     name = params.get("name")
                     tool = self.tools.get(name)

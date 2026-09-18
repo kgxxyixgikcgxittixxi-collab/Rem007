@@ -1,6 +1,13 @@
 #!/bin/sh
-# Rem Agent launcher — gõ `Remtm` ở bất kỳ đâu để mở agent
-# Cài đặt: chạy install.sh trong personal-agent/ (tự đưa script này vào PATH)
+# Remtm v4 — viết lại từ đầu (2026-09-18):
+#   TUI tương tác  = opencode THẬT (chuẩn 100%: sidebar, theme, palette, Zen/Groq...).
+#   Automation     = agent Python (headless full-auto: desktop 100%, macro, memory...).
+#   Hai bên nối bằng MCP: opencode đã cấu hình sẵn rem_desktop/rem_memory/rem_developer.
+#
+# Dùng:
+#   Remtm                  → mở opencode TUI trong thư mục hiện tại
+#   Remtm h "việc..."      → agent Python chạy 1 task rồi thoát (không mở TUI)
+#   Remtm c <sid> "việc"   → agent Python tiếp tục phiên cũ
 SELF=""
 for cand in "$0" "$(command -v Remtm 2>/dev/null)" "$HOME/.local/bin/Remtm" "$PREFIX/bin/Remtm" "/usr/local/bin/Remtm"; do
     [ -n "$cand" ] || continue
@@ -14,13 +21,11 @@ done
 
 DIR="$(dirname "$SELF")"
 
-# Nếu script nằm ở repo root → app trong personal-agent/
+# Tìm thư mục personal-agent (code Python automation)
 APP="$DIR/personal-agent"
-# Nếu script bị copy ra chỗ riêng (vd ~/.local/bin) → tìm repo kế bên hoặc nhà
 if [ ! -f "$APP/main.py" ]; then
     APP="$(dirname "$DIR")/personal-agent"
 fi
-# fallback: repo đã clone (thêm /workspaces cho GitHub Codespaces)
 if [ ! -f "$APP/main.py" ]; then
     for base in "$HOME/Rem007" "$HOME/rem/Rem007" "$HOME/Documents/Rem007" "/workspaces/Rem007"; do
         if [ -f "$base/personal-agent/main.py" ]; then
@@ -30,27 +35,32 @@ if [ ! -f "$APP/main.py" ]; then
     done
 fi
 
-cd "$APP" || { echo "[Remtm] Không tìm thấy thư mục agent: $APP"; exit 1; }
+# Chế độ automation (headless): Remtm h ... / Remtm c ... / --task / run
+case "${1:-}" in
+    h|headless|--task|run|c|continue|--continue)
+        [ -f "$APP/main.py" ] || { echo "[Remtm] Không tìm thấy thư mục agent: $APP"; exit 1; }
+        cd "$APP" || exit 1
+        PY=""
+        for _cand in python3 python /data/data/com.termux/files/usr/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+            if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c "import requests" >/dev/null 2>&1; then
+                PY="$_cand"
+                break
+            fi
+        done
+        [ -n "$PY" ] || PY=python3
+        exec "$PY" main.py "$@"
+        ;;
+esac
 
-# Chọn python có sẵn package 'requests' (agent bắt buộc cần). Nếu python mặc định thiếu
-# thì tự tìm sang các python khác (vd Python trong Termux / hệ thống) trước khi chạy.
-PY=""
-for _cand in python3 python /data/data/com.termux/files/usr/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
-    if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c "import requests" >/dev/null 2>&1; then
-        PY="$_cand"
-        break
-    fi
-done
-if [ -z "$PY" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-        PY=python3
-    elif command -v python >/dev/null 2>&1; then
-        PY=python
-    else
-        echo "[Remtm] Thiếu python3. Hãy cài rồi chạy lại (xem install.sh)."
-        exit 1
-    fi
-    echo "[Remtm] Cảnh báo: $PY chưa có package 'requests' (cài bằng: pip install requests)." >&2
+# Mặc định: opencode THẬT (chuẩn 100%, không nhái TUI nữa)
+OC="$HOME/.opencode/bin/opencode"
+[ -x "$OC" ] || OC="$(command -v opencode 2>/dev/null || echo "")"
+if [ -n "$OC" ] && [ -x "$OC" ]; then
+    exec "$OC" "$@"
 fi
 
-exec "$PY" main.py "$@"
+# Dự phòng: opencode chưa cài → agent Python REPL cũ
+echo "[Remtm] Không thấy opencode, dùng agent Python." >&2
+[ -f "$APP/main.py" ] || { echo "[Remtm] Không tìm thấy thư mục agent: $APP"; exit 1; }
+cd "$APP" || exit 1
+exec python3 main.py "$@"
